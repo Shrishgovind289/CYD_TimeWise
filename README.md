@@ -1,4 +1,4 @@
-# CYD_Table_Clock V1.1
+# CYD_ChronoWeather V1.1
 I have created a basic Table Clock using the ESP32 based Cheap Yellow Display(CYD).
 
 Developed ST7796U TFT driver for my CYD device. I could have used the TFT_eSPI but I was stuggling in configuring it so out of frustration manual developed the driver. Its a temporary and testing solution.
