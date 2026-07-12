@@ -2,11 +2,22 @@
 #define NTP_CLOCK_H
 
 #include "esp_err.h"
-#include "lvgl.h"
-#include <sys/lock.h>
 
-esp_err_t ntpclock_init(const char *timezone, int retry_count);
+typedef void (*ntpclock_update_callback_t)(
+    const char *time_text,
+    void *user_data
+);
 
-void ntpclock_start_task(lv_obj_t *time_label, lv_obj_t *date_label, _lock_t *lvgl_lock);
+/* Configure SNTP and wait briefly for the first valid time. */
+esp_err_t ntpclock_init(
+    const char *timezone,
+    int retry_count
+);
 
-#endif // NTP_CLOCK_H
+/* Start the task that formats and publishes the current time. */
+esp_err_t ntpclock_start_task(
+    ntpclock_update_callback_t callback,
+    void *user_data
+);
+
+#endif /* NTP_CLOCK_H */

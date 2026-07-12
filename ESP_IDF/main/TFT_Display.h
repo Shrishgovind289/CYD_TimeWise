@@ -1,17 +1,26 @@
 #ifndef TFT_DISPLAY_H
 #define TFT_DISPLAY_H
 
+#include <stdbool.h>
+
 #include "esp_err.h"
-#include "lvgl.h"
-#include <sys/lock.h>
 
-esp_err_t tft_display_init(lv_display_t **display_out);
+/* Initialize LCD hardware, LVGL, the SD-backed background decoder, and LVGL task. */
+esp_err_t tft_display_init(void);
 
-_lock_t *tft_display_get_lvgl_lock(void);
+/* Create the TimeWise dashboard. */
+esp_err_t tft_dashboard_create(void);
 
-void tft_display_lock(void);
-void tft_display_unlock(void);
+/* Thread-safe dashboard updates. */
+void tft_dashboard_set_time(const char *time_text);
 
-void lv_fs_stdio_init(void);
+void tft_dashboard_set_weather(
+    float temperature_c,
+    const char *condition,
+    const char *location,
+    const char *background_path,
+    const char *icon_path,
+    bool use_dark_text
+);
 
-#endif // TFT_DISPLAY_H
+#endif /* TFT_DISPLAY_H */
