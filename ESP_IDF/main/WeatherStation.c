@@ -1,22 +1,29 @@
 #include "WeatherStation.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "esp_crt_bundle.h"
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 
 #include "cJSON.h"
 
-#define WEATHER_RESPONSE_BUFFER_SIZE       4096
-#define WEATHER_NORMAL_UPDATE_MS           (30 * 60 * 1000)
-#define WEATHER_ERROR_RETRY_MS              (60 * 1000)
+#define WEATHER_RESPONSE_INITIAL_SIZE       (4U * 1024U)
+#define WEATHER_RESPONSE_MAX_SIZE           (16U * 1024U)
+#define WEATHER_NORMAL_UPDATE_MS            (5U * 60U * 1000U)
+#define WEATHER_ERROR_RETRY_MS              (60U * 1000U)
+#define WEATHER_TASK_STACK_SIZE             8192U
+#define WEATHER_TASK_PRIORITY               3U
+#define WEATHER_PRINT_JSON                  0
 
 /* -------------------------------------------------------------------------- */
 /*                         Weather background paths                           */
@@ -33,12 +40,8 @@
 #define BG_DARK_SNOW        "S:/BG/DSNOW.BIN"
 #define BG_THUNDER          "S:/BG/THUND.BIN"
 #define BG_RAIN_THUNDER     "S:/BG/RTHUND.BIN"
-#define BG_THUNDER_SNOW     "S:/BG/TSNOW.BIN"
 #define BG_FOG              "S:/BG/FOG.BIN"
-#define BG_MIST             "S:/BG/MIST.BIN"
 #define BG_ICE              "S:/BG/ICE.BIN"
-#define BG_DUST             "S:/BG/DUST.BIN"
-#define BG_BLIZZARD         "S:/BG/BLIZZ.BIN"
 
 /* -------------------------------------------------------------------------- */
 /*                           Weather icon paths                               */
@@ -47,570 +50,800 @@
 #define ICON_SUNNY          "S:/ICO/SUNNY.BIN"
 #define ICON_NIGHT          "S:/ICO/NIGHT.BIN"
 #define ICON_CLOUD          "S:/ICO/CLOUD.BIN"
-#define ICON_MIST           "S:/ICO/MIST.BIN"
 #define ICON_FOG            "S:/ICO/FOG.BIN"
-#define ICON_SMOKE          "S:/ICO/SMOKE.BIN"
-#define ICON_DUST           "S:/ICO/DUST.BIN"
 #define ICON_LIGHT_RAIN     "S:/ICO/LRAIN.BIN"
 #define ICON_FREEZE_RAIN    "S:/ICO/FRAIN.BIN"
 #define ICON_HEAVY_RAIN     "S:/ICO/HRAIN.BIN"
 #define ICON_THUNDER        "S:/ICO/THUNDP.BIN"
 #define ICON_THUNDER_RAIN   "S:/ICO/TRAIN.BIN"
-#define ICON_THUNDER_SNOW   "S:/ICO/HTSNOW.BIN"
 #define ICON_LIGHT_SNOW     "S:/ICO/LSNOW.BIN"
 #define ICON_SNOW           "S:/ICO/SNOW.BIN"
 #define ICON_HEAVY_SNOW     "S:/ICO/HSNOW.BIN"
-#define ICON_BLIZZARD       "S:/ICO/BLIZZ.BIN"
-#define ICON_SLEET          "S:/ICO/SLEET.BIN"
 #define ICON_ICE            "S:/ICO/ICE.BIN"
 
 static const char *TAG = "WeatherStation";
 
-static char s_response_buffer[WEATHER_RESPONSE_BUFFER_SIZE];
-static size_t s_response_length = 0;
+static char *s_response_buffer = NULL;
+static size_t s_response_capacity = 0U;
+static size_t s_response_length = 0U;
 static bool s_response_overflow = false;
 
-static const char *s_api_key = NULL;
-static const char *s_location_query = NULL;
+static double s_latitude = 0.0;
+static double s_longitude = 0.0;
+static char s_location_name[WEATHERSTATION_LOCATION_LENGTH] = "";
 
 static weatherstation_update_callback_t s_update_callback = NULL;
 static void *s_callback_user_data = NULL;
 static TaskHandle_t s_update_task_handle = NULL;
 
-static bool weatherstation_contains_text(
-    const char *text,
-    const char *search_text
-)
+/* -------------------------------------------------------------------------- */
+/*                              Text helpers                                  */
+/* -------------------------------------------------------------------------- */
+
+static void weatherstation_copy_text(char *destination, size_t destination_size, const char *source)
 {
-    if (text == NULL || search_text == NULL)
+    if (destination == NULL || destination_size == 0U)
+    {
+        return;
+    }
+
+    snprintf(destination, destination_size, "%s", source != NULL ? source : "");
+}
+
+static bool weatherstation_format_hour_text(const char *api_time_text, char *output, size_t output_size)
+{
+    if (output == NULL || output_size == 0U)
     {
         return false;
     }
 
-    size_t search_length = strlen(search_text);
+    weatherstation_copy_text(output, output_size, "--");
 
-    if (search_length == 0)
+    if (api_time_text == NULL)
+    {
+        return false;
+    }
+
+    const char *time_part = strrchr(api_time_text, 'T');
+
+    if (time_part == NULL)
+    {
+        time_part = strrchr(api_time_text, ' ');
+    }
+
+    if (time_part == NULL)
+    {
+        return false;
+    }
+
+    int hour_24 = 0;
+    int minute = 0;
+
+    if (sscanf(time_part + 1, "%d:%d", &hour_24, &minute) != 2)
+    {
+        return false;
+    }
+
+    (void)minute;
+
+    bool is_pm = hour_24 >= 12;
+    int hour_12 = hour_24 % 12;
+
+    if (hour_12 == 0)
+    {
+        hour_12 = 12;
+    }
+
+    snprintf(output, output_size, "%02d %s", hour_12, is_pm ? "PM" : "AM");
+    return true;
+}
+
+static const char *weatherstation_wind_cardinal(int direction_degrees)
+{
+    static const char *directions[16] =
+    {
+        "N", "NNE", "NE", "ENE",
+        "E", "ESE", "SE", "SSE",
+        "S", "SSW", "SW", "WSW",
+        "W", "WNW", "NW", "NNW"
+    };
+
+    while (direction_degrees < 0)
+    {
+        direction_degrees += 360;
+    }
+
+    direction_degrees %= 360;
+
+    int index = (int)(((float)direction_degrees + 11.25f) / 22.5f) % 16;
+    return directions[index];
+}
+
+/* -------------------------------------------------------------------------- */
+/*                         WMO weather-code mapping                           */
+/* -------------------------------------------------------------------------- */
+
+static const char *weatherstation_condition_from_code(int weather_code)
+{
+    switch (weather_code)
+    {
+        case 0:
+            return "Clear";
+
+        case 1:
+            return "Mainly clear";
+
+        case 2:
+            return "Partly cloudy";
+
+        case 3:
+            return "Overcast";
+
+        case 45:
+            return "Fog";
+
+        case 48:
+            return "Rime fog";
+
+        case 51:
+            return "Light drizzle";
+
+        case 53:
+            return "Drizzle";
+
+        case 55:
+            return "Heavy drizzle";
+
+        case 56:
+            return "Light freezing drizzle";
+
+        case 57:
+            return "Heavy freezing drizzle";
+
+        case 61:
+            return "Light rain";
+
+        case 63:
+            return "Rain";
+
+        case 65:
+            return "Heavy rain";
+
+        case 66:
+            return "Light freezing rain";
+
+        case 67:
+            return "Heavy freezing rain";
+
+        case 71:
+            return "Light snow";
+
+        case 73:
+            return "Snow";
+
+        case 75:
+            return "Heavy snow";
+
+        case 77:
+            return "Snow grains";
+
+        case 80:
+            return "Light rain showers";
+
+        case 81:
+            return "Rain showers";
+
+        case 82:
+            return "Heavy rain showers";
+
+        case 85:
+            return "Light snow showers";
+
+        case 86:
+            return "Heavy snow showers";
+
+        case 95:
+            return "Thunderstorm";
+
+        case 96:
+            return "Thunderstorm with hail";
+
+        case 99:
+            return "Heavy thunderstorm with hail";
+
+        default:
+            return "Unknown";
+    }
+}
+
+static const char *weatherstation_select_background(int weather_code, bool is_day)
+{
+    switch (weather_code)
+    {
+        case 0:
+        case 1:
+            return is_day ? BG_SUNNY : BG_NIGHT;
+
+        case 2:
+        case 3:
+            return BG_CLOUD;
+
+        case 45:
+        case 48:
+            return BG_FOG;
+
+        case 51:
+        case 53:
+        case 55:
+            return BG_DRIZZLE;
+
+        case 56:
+        case 57:
+        case 66:
+        case 67:
+            return BG_FREEZING_RAIN;
+
+        case 61:
+        case 63:
+        case 65:
+        case 80:
+        case 81:
+        case 82:
+            return BG_RAIN;
+
+        case 71:
+        case 73:
+        case 75:
+        case 77:
+        case 85:
+        case 86:
+            return is_day ? BG_SNOW : BG_DARK_SNOW;
+
+        case 95:
+            return BG_THUNDER;
+
+        case 96:
+        case 99:
+            return BG_RAIN_THUNDER;
+
+        default:
+            return BG_DEFAULT;
+    }
+}
+
+static const char *weatherstation_select_icon(int weather_code, bool is_day)
+{
+    switch (weather_code)
+    {
+        case 0:
+        case 1:
+            return is_day ? ICON_SUNNY : ICON_NIGHT;
+
+        case 2:
+        case 3:
+            return ICON_CLOUD;
+
+        case 45:
+        case 48:
+            return ICON_FOG;
+
+        case 51:
+        case 53:
+        case 55:
+        case 61:
+        case 80:
+            return ICON_LIGHT_RAIN;
+
+        case 56:
+        case 57:
+        case 66:
+        case 67:
+            return ICON_FREEZE_RAIN;
+
+        case 63:
+        case 65:
+        case 81:
+        case 82:
+            return ICON_HEAVY_RAIN;
+
+        case 71:
+        case 85:
+            return ICON_LIGHT_SNOW;
+
+        case 73:
+            return ICON_SNOW;
+
+        case 75:
+        case 77:
+        case 86:
+            return ICON_HEAVY_SNOW;
+
+        case 95:
+            return ICON_THUNDER;
+
+        case 96:
+        case 99:
+            return ICON_THUNDER_RAIN;
+
+        default:
+            return NULL;
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/*                         HTTP response buffer                               */
+/* -------------------------------------------------------------------------- */
+
+static bool weatherstation_response_reserve(size_t required_capacity)
+{
+    if (required_capacity > WEATHER_RESPONSE_MAX_SIZE)
+    {
+        return false;
+    }
+
+    if (required_capacity <= s_response_capacity)
     {
         return true;
     }
 
-    for (const char *position = text;
-         *position != '\0';
-         position++)
+    size_t new_capacity = s_response_capacity > 0U ? s_response_capacity : WEATHER_RESPONSE_INITIAL_SIZE;
+
+    while (new_capacity < required_capacity)
     {
-        if (strncasecmp(
-                position,
-                search_text,
-                search_length) == 0)
+        new_capacity *= 2U;
+
+        if (new_capacity > WEATHER_RESPONSE_MAX_SIZE)
         {
-            return true;
+            new_capacity = WEATHER_RESPONSE_MAX_SIZE;
+        }
+
+        if (new_capacity < required_capacity && new_capacity == WEATHER_RESPONSE_MAX_SIZE)
+        {
+            return false;
         }
     }
 
-    return false;
+    char *new_buffer = realloc(s_response_buffer, new_capacity);
+
+    if (new_buffer == NULL)
+    {
+        return false;
+    }
+
+    s_response_buffer = new_buffer;
+    s_response_capacity = new_capacity;
+    return true;
 }
 
-static const char *weatherstation_select_background(
-    const char *condition,
-    bool is_day
-)
+static bool weatherstation_response_reset(void)
 {
-    if (condition == NULL)
+    s_response_length = 0U;
+    s_response_overflow = false;
+
+    if (!weatherstation_response_reserve(WEATHER_RESPONSE_INITIAL_SIZE))
     {
-        return BG_DEFAULT;
+        return false;
     }
 
-    if (weatherstation_contains_text(condition, "blizzard"))
-    {
-        return BG_BLIZZARD;
-    }
-
-    if (weatherstation_contains_text(condition, "thunder") &&
-        weatherstation_contains_text(condition, "snow"))
-    {
-        return BG_THUNDER_SNOW;
-    }
-
-    if (weatherstation_contains_text(condition, "thunder") &&
-        weatherstation_contains_text(condition, "rain"))
-    {
-        return BG_RAIN_THUNDER;
-    }
-
-    if (weatherstation_contains_text(condition, "thunder"))
-    {
-        return BG_THUNDER;
-    }
-
-    if (weatherstation_contains_text(condition, "freezing rain") ||
-        weatherstation_contains_text(condition, "freezing drizzle"))
-    {
-        return BG_FREEZING_RAIN;
-    }
-
-    if (weatherstation_contains_text(condition, "ice") ||
-        weatherstation_contains_text(condition, "sleet") ||
-        weatherstation_contains_text(condition, "pellets"))
-    {
-        return BG_ICE;
-    }
-
-    if (weatherstation_contains_text(condition, "snow"))
-    {
-        return is_day ? BG_SNOW : BG_DARK_SNOW;
-    }
-
-    if (weatherstation_contains_text(condition, "drizzle"))
-    {
-        return BG_DRIZZLE;
-    }
-
-    if (weatherstation_contains_text(condition, "rain"))
-    {
-        return BG_RAIN;
-    }
-
-    if (weatherstation_contains_text(condition, "fog"))
-    {
-        return BG_FOG;
-    }
-
-    if (weatherstation_contains_text(condition, "mist"))
-    {
-        return BG_MIST;
-    }
-
-    if (weatherstation_contains_text(condition, "dust") ||
-        weatherstation_contains_text(condition, "sand") ||
-        weatherstation_contains_text(condition, "smoke") ||
-        weatherstation_contains_text(condition, "haze"))
-    {
-        return BG_DUST;
-    }
-
-    if (weatherstation_contains_text(condition, "cloud") ||
-        weatherstation_contains_text(condition, "overcast"))
-    {
-        return BG_CLOUD;
-    }
-
-    if (weatherstation_contains_text(condition, "sunny") ||
-        weatherstation_contains_text(condition, "clear"))
-    {
-        return is_day ? BG_SUNNY : BG_NIGHT;
-    }
-
-    return BG_DEFAULT;
+    s_response_buffer[0] = '\0';
+    return true;
 }
 
-static const char *weatherstation_select_icon(
-    const char *condition,
-    bool is_day
-)
+static void weatherstation_response_release(void)
 {
-    if (condition == NULL)
-    {
-        return NULL;
-    }
-
-    if (weatherstation_contains_text(condition, "blizzard") ||
-        weatherstation_contains_text(condition, "blowing snow"))
-    {
-        return ICON_BLIZZARD;
-    }
-
-    if (weatherstation_contains_text(condition, "thunder") &&
-        weatherstation_contains_text(condition, "snow"))
-    {
-        return ICON_THUNDER_SNOW;
-    }
-
-    if (weatherstation_contains_text(condition, "thunder") &&
-        weatherstation_contains_text(condition, "rain"))
-    {
-        return ICON_THUNDER_RAIN;
-    }
-
-    if (weatherstation_contains_text(condition, "thunder"))
-    {
-        return ICON_THUNDER;
-    }
-
-    if (weatherstation_contains_text(condition, "freezing rain") ||
-        weatherstation_contains_text(condition, "freezing drizzle"))
-    {
-        return ICON_FREEZE_RAIN;
-    }
-
-    if (weatherstation_contains_text(condition, "ice pellets"))
-    {
-        return ICON_ICE;
-    }
-
-    if (weatherstation_contains_text(condition, "sleet"))
-    {
-        return ICON_SLEET;
-    }
-
-    if (weatherstation_contains_text(condition, "heavy snow") ||
-        weatherstation_contains_text(condition, "heavy snow shower"))
-    {
-        return ICON_HEAVY_SNOW;
-    }
-
-    if (weatherstation_contains_text(condition, "moderate snow"))
-    {
-        return ICON_SNOW;
-    }
-
-    if (weatherstation_contains_text(condition, "snow"))
-    {
-        return ICON_LIGHT_SNOW;
-    }
-
-    if (weatherstation_contains_text(condition, "heavy rain") ||
-        weatherstation_contains_text(condition, "moderate rain") ||
-        weatherstation_contains_text(condition, "torrential"))
-    {
-        return ICON_HEAVY_RAIN;
-    }
-
-    if (weatherstation_contains_text(condition, "rain") ||
-        weatherstation_contains_text(condition, "drizzle"))
-    {
-        return ICON_LIGHT_RAIN;
-    }
-
-    if (weatherstation_contains_text(condition, "smoke") ||
-        weatherstation_contains_text(condition, "haze"))
-    {
-        return ICON_SMOKE;
-    }
-
-    if (weatherstation_contains_text(condition, "dust") ||
-        weatherstation_contains_text(condition, "sand"))
-    {
-        return ICON_DUST;
-    }
-
-    if (weatherstation_contains_text(condition, "fog"))
-    {
-        return ICON_FOG;
-    }
-
-    if (weatherstation_contains_text(condition, "mist"))
-    {
-        return ICON_MIST;
-    }
-
-    if (weatherstation_contains_text(condition, "cloud") ||
-        weatherstation_contains_text(condition, "overcast"))
-    {
-        return ICON_CLOUD;
-    }
-
-    if (weatherstation_contains_text(condition, "sunny") ||
-        weatherstation_contains_text(condition, "clear"))
-    {
-        return is_day ? ICON_SUNNY : ICON_NIGHT;
-    }
-
-    return NULL;
+    free(s_response_buffer);
+    s_response_buffer = NULL;
+    s_response_capacity = 0U;
+    s_response_length = 0U;
+    s_response_overflow = false;
 }
 
-static esp_err_t weatherstation_http_event_handler(
-    esp_http_client_event_t *event
-)
+static esp_err_t weatherstation_http_event_handler(esp_http_client_event_t *event)
 {
     if (event == NULL)
     {
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (event->event_id == HTTP_EVENT_ON_DATA &&
-        event->data_len > 0)
+    if (event->event_id != HTTP_EVENT_ON_DATA || event->data_len <= 0)
     {
-        size_t available =
-            WEATHER_RESPONSE_BUFFER_SIZE -
-            s_response_length -
-            1;
-
-        size_t requested =
-            (size_t)event->data_len;
-
-        size_t copy_length =
-            requested < available
-                ? requested
-                : available;
-
-        if (copy_length > 0)
-        {
-            memcpy(
-                s_response_buffer + s_response_length,
-                event->data,
-                copy_length
-            );
-
-            s_response_length += copy_length;
-            s_response_buffer[s_response_length] = '\0';
-        }
-
-        if (copy_length != requested)
-        {
-            s_response_overflow = true;
-        }
+        return ESP_OK;
     }
 
+    size_t requested = (size_t)event->data_len;
+    size_t required_capacity = s_response_length + requested + 1U;
+
+    if (!weatherstation_response_reserve(required_capacity))
+    {
+        s_response_overflow = true;
+        return ESP_ERR_NO_MEM;
+    }
+
+    memcpy(s_response_buffer + s_response_length, event->data, requested);
+    s_response_length += requested;
+    s_response_buffer[s_response_length] = '\0';
     return ESP_OK;
 }
 
-static bool weatherstation_parse_and_publish(
-    const char *json_text
-)
+#if WEATHER_PRINT_JSON
+static void weatherstation_print_json(const char *json_text, size_t json_length)
 {
-    if (json_text == NULL || json_text[0] == '\0')
+    if (json_text == NULL || json_length == 0U)
     {
-        ESP_LOGE(TAG, "Weather JSON is empty");
+        ESP_LOGW(TAG, "JSON response is empty");
+        return;
+    }
+
+    printf("\n========== OPEN-METEO JSON START ==========\n");
+
+    const size_t chunk_size = 512U;
+
+    for (size_t offset = 0U; offset < json_length; offset += chunk_size)
+    {
+        size_t remaining = json_length - offset;
+        size_t bytes_to_print = remaining < chunk_size ? remaining : chunk_size;
+        fwrite(json_text + offset, 1U, bytes_to_print, stdout);
+    }
+
+    printf("\n=========== OPEN-METEO JSON END ===========\n\n");
+    fflush(stdout);
+}
+#endif
+
+/* -------------------------------------------------------------------------- */
+/*                              JSON parsing                                  */
+/* -------------------------------------------------------------------------- */
+
+static size_t weatherstation_smallest_array_size(cJSON *array_1, cJSON *array_2, cJSON *array_3, cJSON *array_4)
+{
+    int size_1 = cJSON_GetArraySize(array_1);
+    int size_2 = cJSON_GetArraySize(array_2);
+    int size_3 = cJSON_GetArraySize(array_3);
+    int size_4 = cJSON_GetArraySize(array_4);
+
+    int smallest = size_1;
+
+    if (size_2 < smallest)
+    {
+        smallest = size_2;
+    }
+
+    if (size_3 < smallest)
+    {
+        smallest = size_3;
+    }
+
+    if (size_4 < smallest)
+    {
+        smallest = size_4;
+    }
+
+    return smallest > 0 ? (size_t)smallest : 0U;
+}
+
+static size_t weatherstation_parse_hourly_forecast(cJSON *root, const char *current_time, weatherstation_update_t *update)
+{
+    if (root == NULL || current_time == NULL || update == NULL)
+    {
+        return 0U;
+    }
+
+    cJSON *hourly = cJSON_GetObjectItemCaseSensitive(root, "hourly");
+
+    if (!cJSON_IsObject(hourly))
+    {
+        ESP_LOGW(TAG, "Open-Meteo JSON has no hourly object");
+        return 0U;
+    }
+
+    cJSON *times = cJSON_GetObjectItemCaseSensitive(hourly, "time");
+    cJSON *temperatures = cJSON_GetObjectItemCaseSensitive(hourly, "temperature_2m");
+    cJSON *is_day_values = cJSON_GetObjectItemCaseSensitive(hourly, "is_day");
+    cJSON *weather_codes = cJSON_GetObjectItemCaseSensitive(hourly, "weather_code");
+
+    if (!cJSON_IsArray(times) || !cJSON_IsArray(temperatures) ||
+        !cJSON_IsArray(is_day_values) || !cJSON_IsArray(weather_codes))
+    {
+        ESP_LOGW(TAG, "Open-Meteo hourly arrays are incomplete");
+        return 0U;
+    }
+
+    size_t available_count = weatherstation_smallest_array_size(times, temperatures, is_day_values, weather_codes);
+    size_t forecast_count = 0U;
+
+    for (size_t index = 0U; index < available_count; index++)
+    {
+        if (forecast_count >= WEATHERSTATION_FORECAST_HOURS)
+        {
+            break;
+        }
+
+        cJSON *time_value = cJSON_GetArrayItem(times, (int)index);
+        cJSON *temperature_value = cJSON_GetArrayItem(temperatures, (int)index);
+        cJSON *is_day_value = cJSON_GetArrayItem(is_day_values, (int)index);
+        cJSON *weather_code_value = cJSON_GetArrayItem(weather_codes, (int)index);
+
+        if (!cJSON_IsString(time_value) || time_value->valuestring == NULL ||
+            !cJSON_IsNumber(temperature_value) || !cJSON_IsNumber(is_day_value) ||
+            !cJSON_IsNumber(weather_code_value))
+        {
+            continue;
+        }
+
+        /*
+         * Open-Meteo returns local ISO-8601 strings in the same timezone and
+         * fixed format. Lexicographical order therefore matches time order.
+         */
+        if (strcmp(time_value->valuestring, current_time) <= 0)
+        {
+            continue;
+        }
+
+        weatherstation_hourly_forecast_t *slot = &update->hourly[forecast_count];
+        memset(slot, 0, sizeof(*slot));
+
+        slot->temperature_c = (float)temperature_value->valuedouble;
+        slot->weather_code = weather_code_value->valueint;
+        slot->is_day = is_day_value->valueint != 0;
+
+        weatherstation_format_hour_text(time_value->valuestring, slot->time_text, sizeof(slot->time_text));
+        weatherstation_copy_text(slot->condition, sizeof(slot->condition), weatherstation_condition_from_code(slot->weather_code));
+
+        slot->icon_path = weatherstation_select_icon(slot->weather_code, slot->is_day);
+        slot->valid = true;
+        forecast_count++;
+    }
+
+    return forecast_count;
+}
+
+static void weatherstation_parse_astro(cJSON *root, weatherstation_update_t *update)
+{
+    cJSON *daily = cJSON_GetObjectItemCaseSensitive(root, "daily");
+
+    if (!cJSON_IsObject(daily))
+    {
+        return;
+    }
+
+    cJSON *sunrise_values = cJSON_GetObjectItemCaseSensitive(daily, "sunrise");
+    cJSON *sunset_values = cJSON_GetObjectItemCaseSensitive(daily, "sunset");
+
+    if (cJSON_IsArray(sunrise_values))
+    {
+        cJSON *sunrise = cJSON_GetArrayItem(sunrise_values, 0);
+
+        if (cJSON_IsString(sunrise) && sunrise->valuestring != NULL)
+        {
+            weatherstation_copy_text(update->sunrise_time, sizeof(update->sunrise_time), sunrise->valuestring);
+        }
+    }
+
+    if (cJSON_IsArray(sunset_values))
+    {
+        cJSON *sunset = cJSON_GetArrayItem(sunset_values, 0);
+
+        if (cJSON_IsString(sunset) && sunset->valuestring != NULL)
+        {
+            weatherstation_copy_text(update->sunset_time, sizeof(update->sunset_time), sunset->valuestring);
+        }
+    }
+}
+
+static bool weatherstation_parse_and_publish(const char *json_text, size_t json_length)
+{
+    if (json_text == NULL || json_length == 0U)
+    {
+        ESP_LOGE(TAG, "Open-Meteo JSON is empty");
         return false;
     }
 
-    cJSON *root = cJSON_Parse(json_text);
+    cJSON *root = cJSON_ParseWithLength(json_text, json_length);
 
     if (root == NULL)
     {
-        ESP_LOGE(TAG, "Failed to parse weather JSON");
+        const char *error_pointer = cJSON_GetErrorPtr();
+
+        ESP_LOGE(TAG,
+                 "Failed to parse Open-Meteo JSON: bytes=%u, free_heap=%u, largest_block=%u",
+                 (unsigned int)json_length,
+                 (unsigned int)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                 (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
+        if (error_pointer != NULL)
+        {
+            ESP_LOGE(TAG, "JSON error near: %.80s", error_pointer);
+        }
+
         return false;
     }
 
-    bool success = false;
+    weatherstation_update_t update = {0};
+    bool parsed = false;
 
-    cJSON *location =
-        cJSON_GetObjectItemCaseSensitive(root, "location");
+    cJSON *current = cJSON_GetObjectItemCaseSensitive(root, "current");
 
-    cJSON *current =
-        cJSON_GetObjectItemCaseSensitive(root, "current");
-
-    if (!cJSON_IsObject(location) ||
-        !cJSON_IsObject(current))
+    if (!cJSON_IsObject(current))
     {
-        ESP_LOGE(TAG, "Weather JSON is missing location/current");
+        ESP_LOGE(TAG, "Open-Meteo JSON is missing current");
         goto cleanup;
     }
 
-    cJSON *name =
-        cJSON_GetObjectItemCaseSensitive(location, "name");
+    cJSON *current_time = cJSON_GetObjectItemCaseSensitive(current, "time");
+    cJSON *temperature = cJSON_GetObjectItemCaseSensitive(current, "temperature_2m");
+    cJSON *is_day_value = cJSON_GetObjectItemCaseSensitive(current, "is_day");
+    cJSON *weather_code_value = cJSON_GetObjectItemCaseSensitive(current, "weather_code");
+    cJSON *wind_speed_value = cJSON_GetObjectItemCaseSensitive(current, "wind_speed_10m");
+    cJSON *wind_direction_value = cJSON_GetObjectItemCaseSensitive(current, "wind_direction_10m");
 
-    cJSON *region =
-        cJSON_GetObjectItemCaseSensitive(location, "region");
-
-    cJSON *temperature =
-        cJSON_GetObjectItemCaseSensitive(current, "temp_c");
-
-    cJSON *condition_object =
-        cJSON_GetObjectItemCaseSensitive(current, "condition");
-
-    cJSON *is_day_value =
-        cJSON_GetObjectItemCaseSensitive(current, "is_day");
-
-    cJSON *condition_text = NULL;
-
-    if (cJSON_IsObject(condition_object))
+    if (!cJSON_IsString(current_time) || current_time->valuestring == NULL ||
+        !cJSON_IsNumber(temperature) || !cJSON_IsNumber(is_day_value) ||
+        !cJSON_IsNumber(weather_code_value) || !cJSON_IsNumber(wind_speed_value) ||
+        !cJSON_IsNumber(wind_direction_value))
     {
-        condition_text =
-            cJSON_GetObjectItemCaseSensitive(
-                condition_object,
-                "text"
-            );
-    }
-
-    if (!cJSON_IsString(name) ||
-        !cJSON_IsNumber(temperature) ||
-        !cJSON_IsString(condition_text) ||
-        !cJSON_IsNumber(is_day_value))
-    {
-        ESP_LOGE(TAG, "Weather JSON is missing required values");
+        ESP_LOGE(TAG, "Open-Meteo current object is missing required values");
         goto cleanup;
     }
 
-    char location_text[96];
+    weatherstation_copy_text(update.location, sizeof(update.location), s_location_name);
+    weatherstation_copy_text(update.current_time, sizeof(update.current_time), current_time->valuestring);
 
-    if (cJSON_IsString(region) &&
-        region->valuestring[0] != '\0')
+    update.temperature_c = (float)temperature->valuedouble;
+    update.weather_code = weather_code_value->valueint;
+    update.is_day = is_day_value->valueint != 0;
+    update.wind_speed_kmh = (float)wind_speed_value->valuedouble;
+    update.wind_direction_degrees = wind_direction_value->valueint;
+
+    weatherstation_copy_text(update.condition, sizeof(update.condition), weatherstation_condition_from_code(update.weather_code));
+    weatherstation_copy_text(update.wind_direction, sizeof(update.wind_direction), weatherstation_wind_cardinal(update.wind_direction_degrees));
+
+    update.background_path = weatherstation_select_background(update.weather_code, update.is_day);
+    update.icon_path = weatherstation_select_icon(update.weather_code, update.is_day);
+
+    weatherstation_parse_astro(root, &update);
+    update.hourly_count = weatherstation_parse_hourly_forecast(root, update.current_time, &update);
+    parsed = true;
+
+cleanup:
+    cJSON_Delete(root);
+
+    if (!parsed)
     {
-        snprintf(
-            location_text,
-            sizeof(location_text),
-            "%s, %s",
-            name->valuestring,
-            region->valuestring
-        );
+        return false;
     }
-    else
+
+    ESP_LOGI(TAG, "Current: %.1f C | %s | code=%d | is_day=%d",
+             (double)update.temperature_c,
+             update.condition,
+             update.weather_code,
+             update.is_day ? 1 : 0);
+
+    ESP_LOGI(TAG, "Wind: %.1f km/h | %s | %d deg",
+             (double)update.wind_speed_kmh,
+             update.wind_direction,
+             update.wind_direction_degrees);
+
+    ESP_LOGI(TAG, "Astro: sunrise=%s | sunset=%s",
+             update.sunrise_time[0] != '\0' ? update.sunrise_time : "unavailable",
+             update.sunset_time[0] != '\0' ? update.sunset_time : "unavailable");
+
+    ESP_LOGI(TAG, "Hourly forecast cards: %u", (unsigned int)update.hourly_count);
+
+    for (size_t index = 0U; index < update.hourly_count; index++)
     {
-        snprintf(
-            location_text,
-            sizeof(location_text),
-            "%s",
-            name->valuestring
-        );
+        const weatherstation_hourly_forecast_t *slot = &update.hourly[index];
+
+        ESP_LOGI(TAG, "Forecast %u: %s | %.1f C | code=%d | %s",
+                 (unsigned int)(index + 1U),
+                 slot->time_text,
+                 (double)slot->temperature_c,
+                 slot->weather_code,
+                 slot->condition);
     }
-
-    bool is_day =
-        is_day_value->valueint != 0;
-
-    const char *background_path =
-        weatherstation_select_background(
-            condition_text->valuestring,
-            is_day
-        );
-
-    const char *icon_path =
-        weatherstation_select_icon(
-            condition_text->valuestring,
-            is_day
-        );
-
-    weatherstation_update_t update =
-    {
-        .temperature_c =
-            (float)temperature->valuedouble,
-
-        .condition =
-            condition_text->valuestring,
-
-        .location =
-            location_text,
-
-        .background_path =
-            background_path,
-
-        .icon_path =
-            icon_path,
-
-        .use_dark_text =
-            is_day
-    };
 
     if (s_update_callback != NULL)
     {
-        /*
-         * The callback is synchronous. TFT_Display copies label strings
-         * before this function deletes the cJSON tree.
-         */
-        s_update_callback(
-            &update,
-            s_callback_user_data
-        );
+        s_update_callback(&update, s_callback_user_data);
     }
 
-    ESP_LOGI(
-        TAG,
-        "Weather: %.0f C | %s",
-        temperature->valuedouble,
-        condition_text->valuestring
-    );
-
-    ESP_LOGI(TAG, "Location: %s", location_text);
-    ESP_LOGI(TAG, "Background: %s", background_path);
-    ESP_LOGI(
-        TAG,
-        "Icon: %s",
-        icon_path != NULL ? icon_path : "none"
-    );
-
-    success = true;
-
-cleanup:
-
-    cJSON_Delete(root);
-    return success;
+    return true;
 }
+
+/* -------------------------------------------------------------------------- */
+/*                             Request task                                   */
+/* -------------------------------------------------------------------------- */
 
 static esp_err_t weatherstation_request_once(void)
 {
-    char request_url[384];
+    char request_url[640];
 
-    int written =
-        snprintf(
-            request_url,
-            sizeof(request_url),
-            "http://api.weatherapi.com/"
-            "v1/current.json"
-            "?key=%s"
-            "&q=%s"
-            "&aqi=no",
-            s_api_key,
-            s_location_query
-        );
+    int written = snprintf(
+        request_url,
+        sizeof(request_url),
+        "https://api.open-meteo.com/v1/forecast"
+        "?latitude=%.6f"
+        "&longitude=%.6f"
+        "&current=temperature_2m,is_day,weather_code,wind_speed_10m,wind_direction_10m"
+        "&hourly=temperature_2m,is_day,weather_code"
+        "&daily=sunrise,sunset"
+        "&forecast_hours=6"
+        "&timezone=auto",
+        s_latitude,
+        s_longitude
+    );
 
-    if (written < 0 ||
-        written >= (int)sizeof(request_url))
+    if (written < 0 || written >= (int)sizeof(request_url))
     {
         return ESP_ERR_INVALID_SIZE;
     }
 
-    s_response_length = 0;
-    s_response_overflow = false;
-    memset(s_response_buffer, 0, sizeof(s_response_buffer));
+    if (!weatherstation_response_reset())
+    {
+        return ESP_ERR_NO_MEM;
+    }
 
     esp_http_client_config_t configuration =
     {
         .url = request_url,
         .event_handler = weatherstation_http_event_handler,
         .timeout_ms = 15000,
-        .buffer_size = 2048
+        .buffer_size = 2048,
+        .crt_bundle_attach = esp_crt_bundle_attach
     };
 
-    esp_http_client_handle_t client =
-        esp_http_client_init(&configuration);
+    esp_http_client_handle_t client = esp_http_client_init(&configuration);
 
     if (client == NULL)
     {
+        weatherstation_response_release();
         return ESP_ERR_NO_MEM;
     }
 
-    ESP_LOGI(TAG, "Requesting current weather");
+    ESP_LOGI(TAG, "Requesting Open-Meteo weather");
 
-    esp_err_t result =
-        esp_http_client_perform(client);
+    esp_err_t result = esp_http_client_perform(client);
+    int status_code = result == ESP_OK ? esp_http_client_get_status_code(client) : 0;
+
+    if (result != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Open-Meteo HTTP request failed: %s", esp_err_to_name(result));
+    }
+    else
+    {
+        ESP_LOGI(TAG, "Open-Meteo HTTP status=%d, response=%u bytes",
+                 status_code,
+                 (unsigned int)s_response_length);
+    }
+
+    esp_http_client_cleanup(client);
+    client = NULL;
 
     if (result == ESP_OK)
     {
-        int status_code =
-            esp_http_client_get_status_code(client);
-
-        ESP_LOGI(
-            TAG,
-            "Weather HTTP status=%d, response=%u bytes",
-            status_code,
-            (unsigned int)s_response_length
-        );
-
         if (status_code != 200)
         {
+            ESP_LOGE(TAG, "Open-Meteo returned HTTP status %d", status_code);
             result = ESP_FAIL;
         }
         else if (s_response_overflow)
         {
-            ESP_LOGE(TAG, "Weather response exceeded the buffer");
+            ESP_LOGE(TAG, "Open-Meteo response exceeded the buffer");
             result = ESP_ERR_NO_MEM;
         }
-        else if (!weatherstation_parse_and_publish(
-                     s_response_buffer))
+        else
         {
-            result = ESP_FAIL;
+#if WEATHER_PRINT_JSON
+            weatherstation_print_json(s_response_buffer, s_response_length);
+#endif
+
+            if (!weatherstation_parse_and_publish(s_response_buffer, s_response_length))
+            {
+                result = ESP_FAIL;
+            }
         }
     }
-    else
-    {
-        ESP_LOGE(
-            TAG,
-            "Weather HTTP request failed: %s",
-            esp_err_to_name(result)
-        );
-    }
 
-    esp_http_client_cleanup(client);
+    weatherstation_response_release();
     return result;
 }
 
@@ -620,34 +853,25 @@ static void weatherstation_update_task(void *argument)
 
     while (true)
     {
-        esp_err_t result =
-            weatherstation_request_once();
-
-        TickType_t delay_ticks =
-            result == ESP_OK
-                ? pdMS_TO_TICKS(WEATHER_NORMAL_UPDATE_MS)
-                : pdMS_TO_TICKS(WEATHER_ERROR_RETRY_MS);
+        esp_err_t result = weatherstation_request_once();
+        TickType_t delay_ticks = result == ESP_OK
+                                     ? pdMS_TO_TICKS(WEATHER_NORMAL_UPDATE_MS)
+                                     : pdMS_TO_TICKS(WEATHER_ERROR_RETRY_MS);
 
         if (result != ESP_OK)
         {
-            ESP_LOGW(
-                TAG,
-                "Weather update failed; retrying in one minute"
-            );
+            ESP_LOGW(TAG, "Weather update failed; retrying in one minute");
         }
 
         vTaskDelay(delay_ticks);
     }
 }
 
-esp_err_t weatherstation_start_task(
-    const char *api_key,
-    const char *location,
-    weatherstation_update_callback_t callback,
-    void *user_data
-)
+esp_err_t weatherstation_start_task(double latitude, double longitude, const char *location_name, weatherstation_update_callback_t callback, void *user_data)
 {
-    if (api_key == NULL || location == NULL || callback == NULL)
+    if (latitude < -90.0 || latitude > 90.0 ||
+        longitude < -180.0 || longitude > 180.0 ||
+        location_name == NULL || callback == NULL)
     {
         return ESP_ERR_INVALID_ARG;
     }
@@ -657,20 +881,21 @@ esp_err_t weatherstation_start_task(
         return ESP_ERR_INVALID_STATE;
     }
 
-    s_api_key = api_key;
-    s_location_query = location;
+    s_latitude = latitude;
+    s_longitude = longitude;
+    weatherstation_copy_text(s_location_name, sizeof(s_location_name), location_name);
+
     s_update_callback = callback;
     s_callback_user_data = user_data;
 
-    BaseType_t task_result =
-        xTaskCreate(
-            weatherstation_update_task,
-            "weatherstation_update",
-            8192,
-            NULL,
-            3,
-            &s_update_task_handle
-        );
+    BaseType_t task_result = xTaskCreate(
+        weatherstation_update_task,
+        "weatherstation_update",
+        WEATHER_TASK_STACK_SIZE,
+        NULL,
+        WEATHER_TASK_PRIORITY,
+        &s_update_task_handle
+    );
 
     if (task_result != pdPASS)
     {
@@ -678,6 +903,6 @@ esp_err_t weatherstation_start_task(
         return ESP_ERR_NO_MEM;
     }
 
-    ESP_LOGI(TAG, "WeatherStation task started");
+    ESP_LOGI(TAG, "Open-Meteo task started for %.6f, %.6f", s_latitude, s_longitude);
     return ESP_OK;
 }

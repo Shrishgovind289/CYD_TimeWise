@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -85,10 +86,16 @@ void lv_fs_stdio_init(void);
 #define TFT_BACKGROUND_FILE_SIZE         (TFT_LCD_H_RES * TFT_LCD_V_RES * 2U)
 
 #define TFT_ICON_PREFIX                  "S:/ICO/"
-#define TFT_ICON_SOURCE_WIDTH            50U
-#define TFT_ICON_MAX_HEIGHT              64U
-#define TFT_ICON_BOX_SIZE                54U
+#define TFT_ICON_SOURCE_WIDTH            100U
+#define TFT_ICON_MAX_HEIGHT              80U
+#define TFT_ICON_BOX_SIZE                60U
 #define TFT_ICON_RENDER_LIMIT            50U
+
+#define TFT_HOURLY_CARD_COUNT            TFT_FORECAST_CARD_COUNT
+#define TFT_HOURLY_CARD_WIDTH            88U
+#define TFT_HOURLY_CARD_HEIGHT           100U
+#define TFT_HOURLY_ICON_BOX_SIZE         36U
+#define TFT_HOURLY_ICON_RENDER_LIMIT     34U
 
 #define TFT_RGB565_BYTES_PER_PIXEL       2U
 #define TFT_ARGB8888_BYTES_PER_PIXEL     4U
@@ -112,6 +119,13 @@ void lv_fs_stdio_init(void);
 #define TFT_ICON_OPAQUE_LEVEL            48U
 
 #define TFT_ACTIVE_PATH_LENGTH           96U
+
+#define TFT_WIND_ARROW_BOX_SIZE          34U
+#define TFT_WIND_ARROW_LINE_WIDTH        5U
+#define TFT_WIND_ARROW_HALF_LENGTH       12.0f
+#define TFT_WIND_ARROW_HEAD_LENGTH       7.0f
+#define TFT_WIND_ARROW_HEAD_HALF_WIDTH   5.0f
+#define TFT_PI_F                         3.14159265358979323846f
 
 /* -------------------------------------------------------------------------- */
 /*                               Module state                                 */
@@ -138,6 +152,18 @@ static lv_obj_t *s_temperature_label = NULL;
 static lv_obj_t *s_weather_icon_box = NULL;
 static lv_obj_t *s_weather_icon = NULL;
 static lv_obj_t *s_condition_label = NULL;
+static lv_obj_t *s_wind_row = NULL;
+static lv_obj_t *s_wind_speed_label = NULL;
+static lv_obj_t *s_wind_arrow = NULL;
+static lv_point_precise_t s_wind_arrow_points[5] = {0};
+
+static lv_obj_t *s_hourly_container = NULL;
+static lv_obj_t *s_hourly_cards[TFT_HOURLY_CARD_COUNT] = {0};
+static lv_obj_t *s_hourly_time_labels[TFT_HOURLY_CARD_COUNT] = {0};
+static lv_obj_t *s_hourly_icon_boxes[TFT_HOURLY_CARD_COUNT] = {0};
+static lv_obj_t *s_hourly_icons[TFT_HOURLY_CARD_COUNT] = {0};
+static lv_obj_t *s_hourly_temp_labels[TFT_HOURLY_CARD_COUNT] = {0};
+static lv_obj_t *s_hourly_condition_labels[TFT_HOURLY_CARD_COUNT] = {0};
 
 static bool s_dashboard_created = false;
 
@@ -153,6 +179,16 @@ static char s_active_icon_path[TFT_ACTIVE_PATH_LENGTH] = "";
 static lv_image_dsc_t s_icon_descriptors[2];
 static uint8_t *s_icon_pixel_buffers[2] = {NULL, NULL};
 static uint8_t s_active_icon_slot = 0U;
+
+static lv_image_dsc_t
+    s_hourly_icon_descriptors[TFT_HOURLY_CARD_COUNT];
+
+static uint8_t
+    *s_hourly_icon_pixel_buffers[TFT_HOURLY_CARD_COUNT] = {0};
+
+static char
+    s_active_hourly_icon_paths[TFT_HOURLY_CARD_COUNT]
+                              [TFT_ACTIVE_PATH_LENGTH] = {{0}};
 
 /* -------------------------------------------------------------------------- */
 /*                    Streamed background decoder state                       */
@@ -836,6 +872,7 @@ static bool tft_icon_make_stdio_path(
 
 static bool tft_icon_load_transparent(
     const char *lvgl_path,
+    uint32_t render_limit,
     uint8_t **pixel_data_out,
     uint32_t *data_size_out,
     uint32_t *width_out,
@@ -844,29 +881,26 @@ static bool tft_icon_load_transparent(
 {
     if (pixel_data_out != NULL)
     {
-        *pixel_data_out =
-            NULL;
+        *pixel_data_out = NULL;
     }
 
     if (data_size_out != NULL)
     {
-        *data_size_out =
-            0U;
+        *data_size_out = 0U;
     }
 
     if (width_out != NULL)
     {
-        *width_out =
-            0U;
+        *width_out = 0U;
     }
 
     if (height_out != NULL)
     {
-        *height_out =
-            0U;
+        *height_out = 0U;
     }
 
     if (lvgl_path == NULL ||
+        render_limit == 0U ||
         pixel_data_out == NULL ||
         data_size_out == NULL ||
         width_out == NULL ||
@@ -882,68 +916,36 @@ static bool tft_icon_load_transparent(
             stdio_path,
             sizeof(stdio_path)))
     {
-        ESP_LOGE(
-            TAG,
-            "Invalid icon path: %s",
-            lvgl_path
-        );
-
+        ESP_LOGE(TAG, "Invalid icon path: %s", lvgl_path);
         return false;
     }
 
-    FILE *file =
-        fopen(
-            stdio_path,
-            "rb"
-        );
+    FILE *file = fopen(stdio_path, "rb");
 
     if (file == NULL)
     {
-        ESP_LOGE(
-            TAG,
-            "Could not open icon: %s",
-            stdio_path
-        );
-
+        ESP_LOGE(TAG, "Could not open icon: %s", stdio_path);
         return false;
     }
 
-    if (fseek(
-            file,
-            0,
-            SEEK_END) != 0)
+    if (fseek(file, 0, SEEK_END) != 0)
     {
-        fclose(
-            file
-        );
-
+        fclose(file);
         return false;
     }
 
-    long file_size_long =
-        ftell(
-            file
-        );
+    long file_size_long = ftell(file);
 
     if (file_size_long <= 0 ||
         file_size_long > UINT32_MAX)
     {
-        fclose(
-            file
-        );
-
+        fclose(file);
         return false;
     }
 
-    if (fseek(
-            file,
-            0,
-            SEEK_SET) != 0)
+    if (fseek(file, 0, SEEK_SET) != 0)
     {
-        fclose(
-            file
-        );
-
+        fclose(file);
         return false;
     }
 
@@ -954,8 +956,7 @@ static bool tft_icon_load_transparent(
         TFT_ICON_SOURCE_WIDTH *
         TFT_RGB565_BYTES_PER_PIXEL;
 
-    if ((source_data_size %
-         source_stride) != 0U)
+    if ((source_data_size % source_stride) != 0U)
     {
         ESP_LOGE(
             TAG,
@@ -965,41 +966,28 @@ static bool tft_icon_load_transparent(
             (unsigned int)source_stride
         );
 
-        fclose(
-            file
-        );
-
+        fclose(file);
         return false;
     }
 
-    uint32_t icon_width =
-        TFT_ICON_SOURCE_WIDTH;
+    uint32_t source_width = TFT_ICON_SOURCE_WIDTH;
+    uint32_t source_height = source_data_size / source_stride;
 
-    uint32_t icon_height =
-        source_data_size /
-        source_stride;
-
-    if (icon_height == 0U ||
-        icon_height > TFT_ICON_MAX_HEIGHT)
+    if (source_height == 0U ||
+        source_height > TFT_ICON_MAX_HEIGHT)
     {
         ESP_LOGE(
             TAG,
             "Invalid icon height: %s, calculated=%u",
             stdio_path,
-            (unsigned int)icon_height
+            (unsigned int)source_height
         );
 
-        fclose(
-            file
-        );
-
+        fclose(file);
         return false;
     }
 
-    uint8_t *source_pixels =
-        malloc(
-            source_data_size
-        );
+    uint8_t *source_pixels = malloc(source_data_size);
 
     if (source_pixels == NULL)
     {
@@ -1009,10 +997,7 @@ static bool tft_icon_load_transparent(
             (unsigned int)source_data_size
         );
 
-        fclose(
-            file
-        );
-
+        fclose(file);
         return false;
     }
 
@@ -1024,12 +1009,9 @@ static bool tft_icon_load_transparent(
             file
         );
 
-    fclose(
-        file
-    );
+    fclose(file);
 
-    if (bytes_read !=
-        source_data_size)
+    if (bytes_read != source_data_size)
     {
         ESP_LOGE(
             TAG,
@@ -1039,25 +1021,45 @@ static bool tft_icon_load_transparent(
             (unsigned int)source_data_size
         );
 
-        free(
-            source_pixels
-        );
-
+        free(source_pixels);
         return false;
     }
 
-    uint32_t pixel_count =
-        icon_width *
-        icon_height;
+    uint32_t largest_dimension =
+        source_width > source_height
+            ? source_width
+            : source_height;
 
+    uint32_t icon_width = source_width;
+    uint32_t icon_height = source_height;
+
+    if (largest_dimension > render_limit)
+    {
+        icon_width =
+            (source_width * render_limit) /
+            largest_dimension;
+
+        icon_height =
+            (source_height * render_limit) /
+            largest_dimension;
+
+        if (icon_width == 0U)
+        {
+            icon_width = 1U;
+        }
+
+        if (icon_height == 0U)
+        {
+            icon_height = 1U;
+        }
+    }
+
+    uint32_t pixel_count = icon_width * icon_height;
     uint32_t converted_data_size =
-        pixel_count *
-        sizeof(lv_color32_t);
+        pixel_count * sizeof(lv_color32_t);
 
     lv_color32_t *converted_pixels =
-        malloc(
-            converted_data_size
-        );
+        malloc(converted_data_size);
 
     if (converted_pixels == NULL)
     {
@@ -1067,131 +1069,120 @@ static bool tft_icon_load_transparent(
             (unsigned int)converted_data_size
         );
 
-        free(
-            source_pixels
-        );
-
+        free(source_pixels);
         return false;
     }
 
-    for (uint32_t pixel_index = 0U;
-         pixel_index < pixel_count;
-         pixel_index++)
+    for (uint32_t output_y = 0U;
+         output_y < icon_height;
+         output_y++)
     {
-        uint32_t byte_index =
-            pixel_index *
-            TFT_RGB565_BYTES_PER_PIXEL;
+        uint32_t source_y =
+            (output_y * source_height) /
+            icon_height;
 
-        uint16_t rgb565 =
-            tft_read_rgb565_pixel(
-                &source_pixels[byte_index]
-            );
-
-        uint8_t red =
-            (uint8_t)(
-                (((rgb565 >> 11) & 0x1FU) * 255U) /
-                31U
-            );
-
-        uint8_t green =
-            (uint8_t)(
-                (((rgb565 >> 5) & 0x3FU) * 255U) /
-                63U
-            );
-
-        uint8_t blue =
-            (uint8_t)(
-                ((rgb565 & 0x1FU) * 255U) /
-                31U
-            );
-
-        uint8_t intensity =
-            tft_max_u8(
-                red,
-                green,
-                blue
-            );
-
-        uint8_t alpha;
-
-        if (intensity <=
-            TFT_ICON_TRANSPARENT_LEVEL)
+        for (uint32_t output_x = 0U;
+             output_x < icon_width;
+             output_x++)
         {
-            alpha =
-                0U;
-        }
-        else if (intensity >=
-                 TFT_ICON_OPAQUE_LEVEL)
-        {
-            alpha =
-                255U;
-        }
-        else
-        {
-            alpha =
+            uint32_t source_x =
+                (output_x * source_width) /
+                icon_width;
+
+            uint32_t source_pixel_index =
+                (source_y * source_width) +
+                source_x;
+
+            uint32_t source_byte_index =
+                source_pixel_index *
+                TFT_RGB565_BYTES_PER_PIXEL;
+
+            uint16_t rgb565 =
+                tft_read_rgb565_pixel(
+                    &source_pixels[source_byte_index]
+                );
+
+            uint8_t red =
                 (uint8_t)(
-                    ((uint32_t)(
-                        intensity -
-                        TFT_ICON_TRANSPARENT_LEVEL
-                    ) *
-                    255U) /
-                    (
-                        TFT_ICON_OPAQUE_LEVEL -
-                        TFT_ICON_TRANSPARENT_LEVEL
-                    )
+                    (((rgb565 >> 11) & 0x1FU) * 255U) /
+                    31U
                 );
 
-            /*
-             * The source artwork was antialiased over black.
-             * Restore edge color before using partial alpha.
-             */
-            red =
-                tft_unpremultiply_channel(
-                    red,
-                    alpha
+            uint8_t green =
+                (uint8_t)(
+                    (((rgb565 >> 5) & 0x3FU) * 255U) /
+                    63U
                 );
 
-            green =
-                tft_unpremultiply_channel(
-                    green,
-                    alpha
+            uint8_t blue =
+                (uint8_t)(
+                    ((rgb565 & 0x1FU) * 255U) /
+                    31U
                 );
 
-            blue =
-                tft_unpremultiply_channel(
-                    blue,
-                    alpha
-                );
+            uint8_t intensity =
+                tft_max_u8(red, green, blue);
+
+            uint8_t alpha;
+
+            if (intensity <= TFT_ICON_TRANSPARENT_LEVEL)
+            {
+                alpha = 0U;
+            }
+            else if (intensity >= TFT_ICON_OPAQUE_LEVEL)
+            {
+                alpha = 255U;
+            }
+            else
+            {
+                alpha =
+                    (uint8_t)(
+                        ((uint32_t)(
+                            intensity -
+                            TFT_ICON_TRANSPARENT_LEVEL
+                        ) * 255U) /
+                        (
+                            TFT_ICON_OPAQUE_LEVEL -
+                            TFT_ICON_TRANSPARENT_LEVEL
+                        )
+                    );
+
+                red =
+                    tft_unpremultiply_channel(
+                        red,
+                        alpha
+                    );
+
+                green =
+                    tft_unpremultiply_channel(
+                        green,
+                        alpha
+                    );
+
+                blue =
+                    tft_unpremultiply_channel(
+                        blue,
+                        alpha
+                    );
+            }
+
+            uint32_t output_pixel_index =
+                (output_y * icon_width) +
+                output_x;
+
+            converted_pixels[output_pixel_index].red = red;
+            converted_pixels[output_pixel_index].green = green;
+            converted_pixels[output_pixel_index].blue = blue;
+            converted_pixels[output_pixel_index].alpha = alpha;
         }
-
-        converted_pixels[pixel_index].red =
-            red;
-
-        converted_pixels[pixel_index].green =
-            green;
-
-        converted_pixels[pixel_index].blue =
-            blue;
-
-        converted_pixels[pixel_index].alpha =
-            alpha;
     }
 
-    free(
-        source_pixels
-    );
+    free(source_pixels);
 
-    *pixel_data_out =
-        (uint8_t *)converted_pixels;
-
-    *data_size_out =
-        converted_data_size;
-
-    *width_out =
-        icon_width;
-
-    *height_out =
-        icon_height;
+    *pixel_data_out = (uint8_t *)converted_pixels;
+    *data_size_out = converted_data_size;
+    *width_out = icon_width;
+    *height_out = icon_height;
 
     ESP_LOGI(
         TAG,
@@ -1354,37 +1345,47 @@ static bool tft_dashboard_background_ready(
            header.cf == LV_COLOR_FORMAT_RGB565;
 }
 
-static void tft_dashboard_apply_text_color_locked(
-    bool use_dark_text
-)
+static void tft_dashboard_update_wind_arrow_locked(int wind_direction_degrees)
 {
-    lv_color_t text_color =
-        use_dark_text
-            ? lv_color_hex(0x101820)
-            : lv_color_white();
-
-    lv_obj_t *labels[] =
+    if (s_wind_arrow == NULL)
     {
-        s_time_label,
-        s_location_label,
-        s_temperature_label,
-        s_condition_label
-    };
-
-    for (size_t index = 0U;
-         index <
-         (sizeof(labels) / sizeof(labels[0]));
-         index++)
-    {
-        if (labels[index] != NULL)
-        {
-            lv_obj_set_style_text_color(
-                labels[index],
-                text_color,
-                0
-            );
-        }
+        return;
     }
+
+    while (wind_direction_degrees < 0)
+    {
+        wind_direction_degrees += 360;
+    }
+
+    wind_direction_degrees %= 360;
+
+    float angle_radians = ((float)wind_direction_degrees * TFT_PI_F) / 180.0f;
+    float direction_x = sinf(angle_radians);
+    float direction_y = -cosf(angle_radians);
+    float perpendicular_x = -direction_y;
+    float perpendicular_y = direction_x;
+    float center = (float)(TFT_WIND_ARROW_BOX_SIZE - 1U) * 0.5f;
+
+    float tail_x = center - (direction_x * TFT_WIND_ARROW_HALF_LENGTH);
+    float tail_y = center - (direction_y * TFT_WIND_ARROW_HALF_LENGTH);
+    float head_x = center + (direction_x * TFT_WIND_ARROW_HALF_LENGTH);
+    float head_y = center + (direction_y * TFT_WIND_ARROW_HALF_LENGTH);
+    float wing_base_x = head_x - (direction_x * TFT_WIND_ARROW_HEAD_LENGTH);
+    float wing_base_y = head_y - (direction_y * TFT_WIND_ARROW_HEAD_LENGTH);
+
+    s_wind_arrow_points[0].x = (lv_value_precise_t)tail_x;
+    s_wind_arrow_points[0].y = (lv_value_precise_t)tail_y;
+    s_wind_arrow_points[1].x = (lv_value_precise_t)head_x;
+    s_wind_arrow_points[1].y = (lv_value_precise_t)head_y;
+    s_wind_arrow_points[2].x = (lv_value_precise_t)(wing_base_x + (perpendicular_x * TFT_WIND_ARROW_HEAD_HALF_WIDTH));
+    s_wind_arrow_points[2].y = (lv_value_precise_t)(wing_base_y + (perpendicular_y * TFT_WIND_ARROW_HEAD_HALF_WIDTH));
+    s_wind_arrow_points[3].x = (lv_value_precise_t)head_x;
+    s_wind_arrow_points[3].y = (lv_value_precise_t)head_y;
+    s_wind_arrow_points[4].x = (lv_value_precise_t)(wing_base_x - (perpendicular_x * TFT_WIND_ARROW_HEAD_HALF_WIDTH));
+    s_wind_arrow_points[4].y = (lv_value_precise_t)(wing_base_y - (perpendicular_y * TFT_WIND_ARROW_HEAD_HALF_WIDTH));
+
+    lv_line_set_points(s_wind_arrow, s_wind_arrow_points, 5U);
+    lv_obj_invalidate(s_wind_arrow);
 }
 
 static uint32_t tft_dashboard_icon_scale(
@@ -1707,186 +1708,97 @@ esp_err_t tft_dashboard_create(void)
         return ESP_OK;
     }
 
-    _lock_acquire(
-        &s_lvgl_api_lock
-    );
+    _lock_acquire(&s_lvgl_api_lock);
 
-    lv_obj_t *screen =
-        lv_display_get_screen_active(
-            s_display
-        );
+    lv_obj_t *screen = lv_display_get_screen_active(s_display);
+    lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(screen, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0x0B1220), 0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
-    lv_obj_clear_flag(
-        screen,
-        LV_OBJ_FLAG_SCROLLABLE
-    );
+    // Background
+    s_background_image = lv_image_create(screen);
+    lv_obj_set_pos(s_background_image, 0, 0);
+    lv_obj_clear_flag(s_background_image, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_background_image, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_move_background(s_background_image);
 
-    lv_obj_set_scrollbar_mode(
-        screen,
-        LV_SCROLLBAR_MODE_OFF
-    );
-
-    lv_obj_set_style_bg_color(
-        screen,
-        lv_color_hex(0x0B1220),
-        0
-    );
-
-    lv_obj_set_style_bg_opa(
-        screen,
-        LV_OPA_COVER,
-        0
-    );
-
-    /* Background */
-
-    s_background_image =
-        lv_image_create(
-            screen
-        );
-
-    lv_obj_set_pos(
-        s_background_image,
-        0,
-        0
-    );
-
-    lv_obj_clear_flag(
-        s_background_image,
-        LV_OBJ_FLAG_CLICKABLE
-    );
-
-    lv_obj_clear_flag(
-        s_background_image,
-        LV_OBJ_FLAG_SCROLLABLE
-    );
-
-    lv_obj_move_background(
-        s_background_image
-    );
-
-    /* Time */
-
+    //Time
     s_time_label = lv_label_create(screen);
-
     lv_label_set_text(s_time_label, "--:-- --");
-
-    lv_obj_set_style_text_color(
-        s_time_label,
-        lv_color_white(),
-        0
-    );
-
-    lv_obj_set_style_text_font(
-        s_time_label,
-        &lv_font_montserrat_48,
-        0
-    );
-
-    lv_obj_align(
-        s_time_label,
-        LV_ALIGN_TOP_MID,
-        0,
-        70
-    );
+    lv_obj_set_style_text_color(s_time_label, lv_color_black(), 0);
+    lv_obj_set_style_text_font(s_time_label, &lv_font_montserrat_48, 0);
+    lv_obj_align(s_time_label, LV_ALIGN_TOP_MID, 0, 60);
 
     /* Location */
-
     s_location_label = lv_label_create(screen);
-
     lv_label_set_text(s_location_label, "Loading location...");
-
     lv_obj_set_width(
         s_location_label,
         440
     );
-
     lv_label_set_long_mode(
         s_location_label,
         LV_LABEL_LONG_CLIP
     );
-
     lv_obj_set_style_text_align(
         s_location_label,
         LV_TEXT_ALIGN_CENTER,
         0
     );
-
-    lv_obj_set_style_text_color(
-        s_location_label,
-        lv_color_white(),
-        0
-    );
-
+    lv_obj_set_style_text_color(s_location_label, lv_color_black(), 0);
     lv_obj_set_style_text_font(
         s_location_label,
         &lv_font_montserrat_18,
         0
     );
-
     lv_obj_align(
         s_location_label,
         LV_ALIGN_TOP_MID,
         0,
-        125
+        115
     );
 
     /* Weather row */
-
     s_weather_row = lv_obj_create(screen);
-
     lv_obj_remove_style_all(s_weather_row);
-
     lv_obj_set_size(s_weather_row, 460, 64);
-
     lv_obj_set_flex_flow(
         s_weather_row,
         LV_FLEX_FLOW_ROW
     );
-
     lv_obj_set_flex_align(
         s_weather_row,
         LV_FLEX_ALIGN_CENTER,
         LV_FLEX_ALIGN_CENTER,
         LV_FLEX_ALIGN_CENTER
     );
-
     lv_obj_set_style_pad_column(
         s_weather_row,
         8,
         0
     );
-
     lv_obj_clear_flag(
         s_weather_row,
         LV_OBJ_FLAG_SCROLLABLE
     );
-
     lv_obj_align(
         s_weather_row,
         LV_ALIGN_TOP_MID,
         55,
-        145
+        135
     );
 
     /* Temperature */
-
     s_temperature_label =
         lv_label_create(
             s_weather_row
         );
-
     lv_label_set_text(
         s_temperature_label,
         "-- C |"
     );
-
-    lv_obj_set_style_text_color(
-        s_temperature_label,
-        lv_color_white(),
-        0
-    );
-
+    lv_obj_set_style_text_color(s_temperature_label, lv_color_black(), 0);
     lv_obj_set_style_text_font(
         s_temperature_label,
         &lv_font_montserrat_24,
@@ -1894,57 +1806,44 @@ esp_err_t tft_dashboard_create(void)
     );
 
     /* Transparent fixed-size icon slot */
-
     s_weather_icon_box = lv_obj_create(s_weather_row);
-
     lv_obj_remove_style_all(s_weather_icon_box);
-
     lv_obj_set_size(
         s_weather_icon_box,
         TFT_ICON_BOX_SIZE,
         TFT_ICON_BOX_SIZE
     );
-
     lv_obj_set_style_bg_opa(
         s_weather_icon_box,
         LV_OPA_TRANSP,
         0
     );
-
     lv_obj_set_style_border_width(
         s_weather_icon_box,
         0,
         0
     );
-
     lv_obj_clear_flag(
         s_weather_icon_box,
         LV_OBJ_FLAG_SCROLLABLE
     );
-
     s_weather_icon =
         lv_image_create(
             s_weather_icon_box
         );
-
     lv_obj_clear_flag(
         s_weather_icon,
         LV_OBJ_FLAG_CLICKABLE
     );
-
     lv_obj_clear_flag(
         s_weather_icon,
         LV_OBJ_FLAG_SCROLLABLE
     );
-
     lv_obj_add_flag(
         s_weather_icon,
         LV_OBJ_FLAG_HIDDEN
     );
-
-    lv_obj_center(
-        s_weather_icon
-    );
+    lv_obj_center(s_weather_icon);
 
     /* Condition */
 
@@ -1971,24 +1870,267 @@ esp_err_t tft_dashboard_create(void)
         0
     );
 
-    lv_obj_set_style_text_color(
-        s_condition_label,
-        lv_color_white(),
+    lv_obj_set_style_text_color(s_condition_label, lv_color_black(), 0);
+    lv_obj_set_style_text_font(s_condition_label, &lv_font_montserrat_24, 0);
+
+    /* Current wind: speed plus a thick directional arrow. */
+
+    s_wind_row = lv_obj_create(screen);
+
+    lv_obj_remove_style_all(s_wind_row);
+    lv_obj_set_size(s_wind_row, 260, TFT_WIND_ARROW_BOX_SIZE);
+    lv_obj_set_flex_flow(s_wind_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_wind_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(s_wind_row, 10, 0);
+    lv_obj_clear_flag(s_wind_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(s_wind_row, LV_ALIGN_TOP_MID, 0, 183);
+
+    s_wind_speed_label = lv_label_create(s_wind_row);
+
+    lv_label_set_text(s_wind_speed_label, "Wind -- km/h");
+    lv_obj_set_style_text_color(s_wind_speed_label, lv_color_black(), 0);
+    lv_obj_set_style_text_font(s_wind_speed_label, &lv_font_montserrat_18, 0);
+
+    s_wind_arrow = lv_line_create(s_wind_row);
+
+    lv_obj_set_size(s_wind_arrow, TFT_WIND_ARROW_BOX_SIZE, TFT_WIND_ARROW_BOX_SIZE);
+    lv_obj_set_style_line_width(s_wind_arrow, TFT_WIND_ARROW_LINE_WIDTH, 0);
+    lv_obj_set_style_line_color(s_wind_arrow, lv_color_black(), 0);
+    lv_obj_set_style_line_rounded(s_wind_arrow, true, 0);
+    lv_obj_clear_flag(s_wind_arrow, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_wind_arrow, LV_OBJ_FLAG_SCROLLABLE);
+
+    tft_dashboard_update_wind_arrow_locked(0);
+
+    /* Five-hour forecast cards */
+
+    s_hourly_container = lv_obj_create(screen);
+
+    lv_obj_remove_style_all(s_hourly_container);
+
+    lv_obj_set_size(
+        s_hourly_container,
+        468,
+        104
+    );
+
+    lv_obj_set_flex_flow(
+        s_hourly_container,
+        LV_FLEX_FLOW_ROW
+    );
+
+    lv_obj_set_flex_align(
+        s_hourly_container,
+        LV_FLEX_ALIGN_SPACE_BETWEEN,
+        LV_FLEX_ALIGN_CENTER,
+        LV_FLEX_ALIGN_CENTER
+    );
+
+    lv_obj_set_style_pad_all(
+        s_hourly_container,
+        0,
         0
     );
 
-    lv_obj_set_style_text_font(
-        s_condition_label,
-        &lv_font_montserrat_24,
+    lv_obj_set_style_pad_column(
+        s_hourly_container,
+        5,
         0
     );
 
-    s_dashboard_created =
-        true;
-
-    _lock_release(
-        &s_lvgl_api_lock
+    lv_obj_clear_flag(
+        s_hourly_container,
+        LV_OBJ_FLAG_SCROLLABLE
     );
+
+    lv_obj_set_scrollbar_mode(
+        s_hourly_container,
+        LV_SCROLLBAR_MODE_OFF
+    );
+
+    lv_obj_align(
+        s_hourly_container,
+        LV_ALIGN_BOTTOM_MID,
+        0,
+        -2
+    );
+
+    lv_obj_add_flag(
+        s_hourly_container,
+        LV_OBJ_FLAG_HIDDEN
+    );
+
+    for (size_t index = 0U; index < TFT_HOURLY_CARD_COUNT; index++)
+    {
+        s_hourly_cards[index] =
+            lv_obj_create(s_hourly_container);
+
+        lv_obj_remove_style_all(
+            s_hourly_cards[index]
+        );
+
+        lv_obj_set_size(
+            s_hourly_cards[index],
+            TFT_HOURLY_CARD_WIDTH,
+            TFT_HOURLY_CARD_HEIGHT
+        );
+
+        lv_obj_set_style_radius(
+            s_hourly_cards[index],
+            12,
+            0
+        );
+
+        lv_obj_set_style_bg_color(
+            s_hourly_cards[index],
+            lv_color_hex(0x0B1220),
+            0
+        );
+
+        lv_obj_set_style_bg_opa(
+            s_hourly_cards[index],
+            LV_OPA_70,
+            0
+        );
+
+        lv_obj_set_style_border_width(
+            s_hourly_cards[index],
+            1,
+            0
+        );
+
+        lv_obj_set_style_border_color(
+            s_hourly_cards[index],
+            lv_color_white(),
+            0
+        );
+
+        lv_obj_set_style_border_opa(
+            s_hourly_cards[index],
+            LV_OPA_30,
+            0
+        );
+
+        lv_obj_clear_flag(
+            s_hourly_cards[index],
+            LV_OBJ_FLAG_SCROLLABLE
+        );
+
+        lv_obj_clear_flag(
+            s_hourly_cards[index],
+            LV_OBJ_FLAG_CLICKABLE
+        );
+
+        s_hourly_time_labels[index] =
+            lv_label_create(s_hourly_cards[index]);
+
+        lv_label_set_text(
+            s_hourly_time_labels[index],
+            "--"
+        );
+
+        lv_obj_set_style_text_color(
+            s_hourly_time_labels[index],
+            lv_color_hex(0xDCE6F7),
+            0
+        );
+
+        lv_obj_set_style_text_font(
+            s_hourly_time_labels[index],
+            LV_FONT_DEFAULT,
+            0
+        );
+
+        lv_obj_align(
+            s_hourly_time_labels[index],
+            LV_ALIGN_TOP_MID,
+            0,
+            4
+        );
+
+        s_hourly_icon_boxes[index] =
+            lv_obj_create(s_hourly_cards[index]);
+
+        lv_obj_remove_style_all(
+            s_hourly_icon_boxes[index]
+        );
+
+        lv_obj_set_size(
+            s_hourly_icon_boxes[index],
+            TFT_HOURLY_ICON_BOX_SIZE,
+            TFT_HOURLY_ICON_BOX_SIZE
+        );
+
+        lv_obj_set_style_bg_opa(
+            s_hourly_icon_boxes[index],
+            LV_OPA_TRANSP,
+            0
+        );
+
+        lv_obj_clear_flag(
+            s_hourly_icon_boxes[index],
+            LV_OBJ_FLAG_SCROLLABLE
+        );
+
+        lv_obj_align(
+            s_hourly_icon_boxes[index],
+            LV_ALIGN_TOP_MID,
+            0,
+            21
+        );
+
+        s_hourly_icons[index] =
+            lv_image_create(s_hourly_icon_boxes[index]);
+
+        lv_obj_add_flag(
+            s_hourly_icons[index],
+            LV_OBJ_FLAG_HIDDEN
+        );
+
+        lv_obj_clear_flag(
+            s_hourly_icons[index],
+            LV_OBJ_FLAG_CLICKABLE
+        );
+
+        lv_obj_clear_flag(
+            s_hourly_icons[index],
+            LV_OBJ_FLAG_SCROLLABLE
+        );
+
+        lv_obj_center(s_hourly_icons[index]);
+
+        s_hourly_temp_labels[index] =
+            lv_label_create(s_hourly_cards[index]);
+
+        lv_label_set_text(
+            s_hourly_temp_labels[index],
+            "-- C"
+        );
+
+        lv_obj_set_style_text_color(
+            s_hourly_temp_labels[index],
+            lv_color_white(),
+            0
+        );
+
+        lv_obj_set_style_text_font(
+            s_hourly_temp_labels[index],
+            &lv_font_montserrat_18,
+            0
+        );
+
+        lv_obj_align(
+            s_hourly_temp_labels[index],
+            LV_ALIGN_TOP_MID,
+            0,
+            75
+        );
+
+    }
+
+    s_dashboard_created = true;
+
+    _lock_release(&s_lvgl_api_lock);
 
     ESP_LOGI(
         TAG,
@@ -1998,39 +2140,24 @@ esp_err_t tft_dashboard_create(void)
     return ESP_OK;
 }
 
-void tft_dashboard_set_time(
-    const char *time_text
-)
+void tft_dashboard_set_time(const char *time_text)
 {
-    if (!s_dashboard_created ||
-        s_time_label == NULL ||
-        time_text == NULL)
+    if (!s_dashboard_created || s_time_label == NULL || time_text == NULL)
     {
         return;
     }
 
-    _lock_acquire(
-        &s_lvgl_api_lock
-    );
+    _lock_acquire(&s_lvgl_api_lock);
 
     lv_label_set_text(
         s_time_label,
         time_text
     );
 
-    _lock_release(
-        &s_lvgl_api_lock
-    );
+    _lock_release(&s_lvgl_api_lock);
 }
 
-void tft_dashboard_set_weather(
-    float temperature_c,
-    const char *condition,
-    const char *location,
-    const char *background_path,
-    const char *icon_path,
-    bool use_dark_text
-)
+void tft_dashboard_set_weather(float temperature_c, const char *condition, const char *location, const char *background_path, const char *icon_path)
 {
     if (!s_dashboard_created)
     {
@@ -2091,6 +2218,7 @@ void tft_dashboard_set_weather(
         icon_loaded =
             tft_icon_load_transparent(
                 icon_path,
+                TFT_ICON_RENDER_LIMIT,
                 &new_icon_pixels,
                 &new_icon_data_size,
                 &new_icon_width,
@@ -2343,10 +2471,6 @@ void tft_dashboard_set_weather(
         }
     }
 
-    tft_dashboard_apply_text_color_locked(
-        use_dark_text
-    );
-
     _lock_release(
         &s_lvgl_api_lock
     );
@@ -2359,5 +2483,327 @@ void tft_dashboard_set_weather(
         free(
             new_icon_pixels
         );
+    }
+}
+void tft_dashboard_set_wind(float wind_speed_kmh, int wind_direction_degrees)
+{
+    if (!s_dashboard_created || s_wind_speed_label == NULL || s_wind_arrow == NULL)
+    {
+        return;
+    }
+
+    char wind_text[32];
+
+    snprintf(wind_text, sizeof(wind_text), "Wind %.0f km/h", wind_speed_kmh);
+
+    _lock_acquire(&s_lvgl_api_lock);
+    lv_label_set_text(s_wind_speed_label, wind_text);
+    tft_dashboard_update_wind_arrow_locked(wind_direction_degrees);
+    _lock_release(&s_lvgl_api_lock);
+}
+
+void tft_dashboard_set_hourly_forecast(
+    const tft_forecast_hour_t *forecast,
+    size_t forecast_count
+)
+{
+    if (!s_dashboard_created ||
+        s_hourly_container == NULL)
+    {
+        return;
+    }
+
+    if (forecast == NULL)
+    {
+        forecast_count = 0U;
+    }
+
+    if (forecast_count > TFT_HOURLY_CARD_COUNT)
+    {
+        forecast_count = TFT_HOURLY_CARD_COUNT;
+    }
+
+    uint8_t *new_icon_pixels[TFT_HOURLY_CARD_COUNT] = {0};
+    uint32_t new_icon_data_sizes[TFT_HOURLY_CARD_COUNT] = {0};
+    uint32_t new_icon_widths[TFT_HOURLY_CARD_COUNT] = {0};
+    uint32_t new_icon_heights[TFT_HOURLY_CARD_COUNT] = {0};
+    bool icon_changed[TFT_HOURLY_CARD_COUNT] = {0};
+    bool icon_loaded[TFT_HOURLY_CARD_COUNT] = {0};
+
+    for (size_t index = 0U;
+         index < forecast_count;
+         index++)
+    {
+        const char *icon_path =
+            forecast[index].icon_path;
+
+        bool valid_icon_path =
+            icon_path != NULL &&
+            icon_path[0] != '\0';
+
+        icon_changed[index] =
+            valid_icon_path &&
+            strcmp(
+                s_active_hourly_icon_paths[index],
+                icon_path) != 0;
+
+        if (icon_changed[index])
+        {
+            icon_loaded[index] =
+                tft_icon_load_transparent(
+                    icon_path,
+                    TFT_HOURLY_ICON_RENDER_LIMIT,
+                    &new_icon_pixels[index],
+                    &new_icon_data_sizes[index],
+                    &new_icon_widths[index],
+                    &new_icon_heights[index]
+                );
+        }
+    }
+
+    uint8_t *old_icon_pixels[TFT_HOURLY_CARD_COUNT] = {0};
+
+    _lock_acquire(
+        &s_lvgl_api_lock
+    );
+
+    if (forecast_count == 0U)
+    {
+        lv_obj_add_flag(
+            s_hourly_container,
+            LV_OBJ_FLAG_HIDDEN
+        );
+    }
+    else
+    {
+        lv_obj_clear_flag(
+            s_hourly_container,
+            LV_OBJ_FLAG_HIDDEN
+        );
+    }
+
+    for (size_t index = 0U;
+         index < TFT_HOURLY_CARD_COUNT;
+         index++)
+    {
+        if (s_hourly_cards[index] == NULL)
+        {
+            continue;
+        }
+
+        if (index >= forecast_count)
+        {
+            lv_obj_add_flag(
+                s_hourly_cards[index],
+                LV_OBJ_FLAG_HIDDEN
+            );
+
+            continue;
+        }
+
+        lv_obj_clear_flag(
+            s_hourly_cards[index],
+            LV_OBJ_FLAG_HIDDEN
+        );
+
+        const char *time_text =
+            forecast[index].time_text != NULL
+                ? forecast[index].time_text
+                : "--";
+
+        const char *condition_text =
+            forecast[index].condition != NULL
+                ? forecast[index].condition
+                : "--";
+
+        char temperature_text[20];
+
+        snprintf(
+            temperature_text,
+            sizeof(temperature_text),
+            "%.0f C",
+            forecast[index].temperature_c
+        );
+
+        if (s_hourly_time_labels[index] != NULL)
+        {
+            lv_label_set_text(
+                s_hourly_time_labels[index],
+                time_text
+            );
+        }
+
+        if (s_hourly_temp_labels[index] != NULL)
+        {
+            lv_label_set_text(
+                s_hourly_temp_labels[index],
+                temperature_text
+            );
+        }
+
+        if (s_hourly_condition_labels[index] != NULL)
+        {
+            lv_label_set_text(
+                s_hourly_condition_labels[index],
+                condition_text
+            );
+        }
+
+        const char *icon_path =
+            forecast[index].icon_path;
+
+        bool valid_icon_path =
+            icon_path != NULL &&
+            icon_path[0] != '\0';
+
+        if (s_hourly_icons[index] == NULL)
+        {
+            continue;
+        }
+
+        if (!valid_icon_path)
+        {
+            lv_obj_add_flag(
+                s_hourly_icons[index],
+                LV_OBJ_FLAG_HIDDEN
+            );
+
+            s_active_hourly_icon_paths[index][0] = '\0';
+        }
+        else if (!icon_changed[index])
+        {
+            lv_obj_clear_flag(
+                s_hourly_icons[index],
+                LV_OBJ_FLAG_HIDDEN
+            );
+        }
+        else if (icon_loaded[index] &&
+                 new_icon_pixels[index] != NULL &&
+                 new_icon_data_sizes[index] > 0U &&
+                 new_icon_widths[index] > 0U &&
+                 new_icon_heights[index] > 0U)
+        {
+            old_icon_pixels[index] =
+                s_hourly_icon_pixel_buffers[index];
+
+            s_hourly_icon_pixel_buffers[index] =
+                new_icon_pixels[index];
+
+            lv_image_dsc_t *descriptor =
+                &s_hourly_icon_descriptors[index];
+
+            memset(
+                descriptor,
+                0,
+                sizeof(*descriptor)
+            );
+
+            descriptor->header.magic =
+                LV_IMAGE_HEADER_MAGIC;
+
+            descriptor->header.cf =
+                LV_COLOR_FORMAT_ARGB8888;
+
+            descriptor->header.flags =
+                0;
+
+            descriptor->header.w =
+                new_icon_widths[index];
+
+            descriptor->header.h =
+                new_icon_heights[index];
+
+            descriptor->header.stride =
+                new_icon_widths[index] *
+                TFT_ARGB8888_BYTES_PER_PIXEL;
+
+            descriptor->data_size =
+                new_icon_data_sizes[index];
+
+            descriptor->data =
+                s_hourly_icon_pixel_buffers[index];
+
+            lv_image_set_src(
+                s_hourly_icons[index],
+                descriptor
+            );
+
+            lv_obj_set_size(
+                s_hourly_icons[index],
+                new_icon_widths[index],
+                new_icon_heights[index]
+            );
+
+            lv_image_set_scale(
+                s_hourly_icons[index],
+                256U
+            );
+
+            lv_obj_center(
+                s_hourly_icons[index]
+            );
+
+            lv_obj_clear_flag(
+                s_hourly_icons[index],
+                LV_OBJ_FLAG_HIDDEN
+            );
+
+            lv_obj_invalidate(
+                s_hourly_icons[index]
+            );
+
+            snprintf(
+                s_active_hourly_icon_paths[index],
+                sizeof(s_active_hourly_icon_paths[index]),
+                "%s",
+                icon_path
+            );
+
+            new_icon_pixels[index] = NULL;
+
+            ESP_LOGI(
+                TAG,
+                "Forecast icon %u installed: %s (%ux%u)",
+                (unsigned int)(index + 1U),
+                icon_path,
+                (unsigned int)new_icon_widths[index],
+                (unsigned int)new_icon_heights[index]
+            );
+        }
+        else
+        {
+            lv_obj_add_flag(s_hourly_icons[index], LV_OBJ_FLAG_HIDDEN);
+
+            s_active_hourly_icon_paths[index][0] = '\0';
+
+            ESP_LOGE(
+                TAG,
+                "Could not load forecast icon %u: %s",
+                (unsigned int)(index + 1U),
+                icon_path
+            );
+        }
+
+        if (s_hourly_icon_boxes[index] != NULL)
+        {
+            lv_obj_update_layout(s_hourly_icon_boxes[index]);
+        }
+    }
+
+    lv_obj_update_layout(s_hourly_container);
+
+    _lock_release(&s_lvgl_api_lock);
+
+    for (size_t index = 0U; index < TFT_HOURLY_CARD_COUNT; index++)
+    {
+        if (old_icon_pixels[index] != NULL)
+        {
+            free(old_icon_pixels[index]);
+        }
+
+        if (new_icon_pixels[index] != NULL)
+        {
+            free(new_icon_pixels[index]);
+        }
     }
 }

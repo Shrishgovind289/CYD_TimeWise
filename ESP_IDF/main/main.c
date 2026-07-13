@@ -37,8 +37,9 @@ static const char *TAG = "TimeWise";
 #define WIFI_SSID           "TP-195_2"
 #define WIFI_PASS           "Porsche@911_GT"
 
-#define WEATHER_API_KEY     "04ea7544d7474d9fb99172321250307"
-#define WEATHER_LOCATION    "Jersey_City"
+#define WEATHER_LATITUDE        40.7282
+#define WEATHER_LONGITUDE      -74.0776
+#define WEATHER_LOCATION_NAME  "Jersey City, New Jersey"
 
 #define LOCAL_TIMEZONE      "EST5EDT,M3.2.0/2,M11.1.0/2"
 
@@ -51,11 +52,7 @@ static const char *TAG = "TimeWise";
 static EventGroupHandle_t s_wifi_event_group = NULL;
 static int s_wifi_retry_count = 0;
 
-static void copy_text(
-    char *destination,
-    size_t destination_size,
-    const char *source
-)
+static void copy_text(char *destination, size_t destination_size, const char *source)
 {
     if (destination == NULL || destination_size == 0)
     {
@@ -76,25 +73,18 @@ static void copy_text(
     );
 }
 
-static void wifi_event_handler(
-    void *handler_argument,
-    esp_event_base_t event_base,
-    int32_t event_id,
-    void *event_data
-)
+static void wifi_event_handler(void *handler_argument, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     (void)handler_argument;
     (void)event_data;
 
-    if (event_base == WIFI_EVENT &&
-        event_id == WIFI_EVENT_STA_START)
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
     {
         esp_wifi_connect();
         return;
     }
 
-    if (event_base == WIFI_EVENT &&
-        event_id == WIFI_EVENT_STA_DISCONNECTED)
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
     {
         xEventGroupClearBits(
             s_wifi_event_group,
@@ -127,8 +117,7 @@ static void wifi_event_handler(
         return;
     }
 
-    if (event_base == IP_EVENT &&
-        event_id == IP_EVENT_STA_GOT_IP)
+    if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
     {
         s_wifi_retry_count = 0;
 
@@ -150,8 +139,7 @@ static esp_err_t initialize_nvs(void)
 {
     esp_err_t result = nvs_flash_init();
 
-    if (result == ESP_ERR_NVS_NO_FREE_PAGES ||
-        result == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    if (result == ESP_ERR_NVS_NO_FREE_PAGES || result == ESP_ERR_NVS_NEW_VERSION_FOUND)
     {
         ESP_ERROR_CHECK(nvs_flash_erase());
         result = nvs_flash_init();
@@ -215,8 +203,7 @@ static esp_err_t connect_wifi(void)
         WIFI_PASS
     );
 
-    configuration.sta.threshold.authmode =
-        WIFI_AUTH_WPA2_PSK;
+    configuration.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 
     configuration.sta.pmf_cfg.capable = true;
     configuration.sta.pmf_cfg.required = false;
@@ -277,8 +264,48 @@ static void weather_update_callback(const weatherstation_update_t *update, void 
         update->condition,
         update->location,
         update->background_path,
-        update->icon_path,
-        update->use_dark_text
+        update->icon_path
+    );
+
+    tft_dashboard_set_wind(
+        update->wind_speed_kmh,
+        update->wind_direction_degrees
+    );
+
+    /*
+     * update->current_time, update->sunrise_time and update->sunset_time are
+     * available here for the sun/moon astro-body position calculation.
+     */
+
+    tft_forecast_hour_t forecast[TFT_FORECAST_CARD_COUNT] = {0};
+
+    size_t forecast_count = update->hourly_count;
+
+    if (forecast_count > TFT_FORECAST_CARD_COUNT)
+    {
+        forecast_count = TFT_FORECAST_CARD_COUNT;
+    }
+
+    for (size_t index = 0U;
+         index < forecast_count;
+         index++)
+    {
+        forecast[index].time_text =
+            update->hourly[index].time_text;
+
+        forecast[index].temperature_c =
+            update->hourly[index].temperature_c;
+
+        forecast[index].condition =
+            update->hourly[index].condition;
+
+        forecast[index].icon_path =
+            update->hourly[index].icon_path;
+    }
+
+    tft_dashboard_set_hourly_forecast(
+        forecast,
+        forecast_count
     );
 }
 
@@ -295,7 +322,6 @@ void app_main(void)
     if (sd_result == ESP_OK)
     {
         ESP_LOGI(TAG, "SD card mounted");
-        sdcard_check_file("/ICO/SUNNY.BIN");
     }
     else
     {
@@ -321,8 +347,9 @@ void app_main(void)
 
     esp_err_t weather_result =
         weatherstation_start_task(
-            WEATHER_API_KEY,
-            WEATHER_LOCATION,
+            WEATHER_LATITUDE,
+            WEATHER_LONGITUDE,
+            WEATHER_LOCATION_NAME,
             weather_update_callback,
             NULL
         );
