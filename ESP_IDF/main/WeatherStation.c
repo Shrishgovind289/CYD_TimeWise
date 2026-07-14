@@ -6,9 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-
 #include "esp_crt_bundle.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
@@ -19,11 +16,8 @@
 
 #define WEATHER_RESPONSE_INITIAL_SIZE       (4U * 1024U)
 #define WEATHER_RESPONSE_MAX_SIZE           (16U * 1024U)
-#define WEATHER_NORMAL_UPDATE_MS            (5U * 60U * 1000U)
-#define WEATHER_ERROR_RETRY_MS              (60U * 1000U)
-#define WEATHER_TASK_STACK_SIZE             8192U
-#define WEATHER_TASK_PRIORITY               3U
 #define WEATHER_PRINT_JSON                  0
+#define WEATHER_MOON_OFFSET_MINUTES         35
 
 /* -------------------------------------------------------------------------- */
 /*                         Weather background paths                           */
@@ -74,7 +68,8 @@ static char s_location_name[WEATHERSTATION_LOCATION_LENGTH] = "";
 
 static weatherstation_update_callback_t s_update_callback = NULL;
 static void *s_callback_user_data = NULL;
-static TaskHandle_t s_update_task_handle = NULL;
+static bool s_initialized = false;
+static bool s_request_in_progress = false;
 
 /* -------------------------------------------------------------------------- */
 /*                              Text helpers                                  */
@@ -90,7 +85,167 @@ static void weatherstation_copy_text(char *destination, size_t destination_size,
     snprintf(destination, destination_size, "%s", source != NULL ? source : "");
 }
 
-static bool weatherstation_format_hour_text(const char *api_time_text, char *output, size_t output_size)
+
+typedef struct
+{
+    int year;
+    int month;
+    int day;
+} weatherstation_date_t;
+
+static bool weatherstation_is_leap_year(int year)
+{
+    return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+}
+
+static int weatherstation_days_in_month(int year, int month)
+{
+    static const int days_per_month[12] =
+    {
+        31, 28, 31, 30, 31, 30,
+        31, 31, 30, 31, 30, 31
+    };
+
+    if (month < 1 || month > 12)
+    {
+        return 0;
+    }
+
+    if (month == 2 && weatherstation_is_leap_year(year))
+    {
+        return 29;
+    }
+
+    return days_per_month[month - 1];
+}
+
+static void weatherstation_shift_date(weatherstation_date_t *date, int day_delta)
+{
+    if (date == NULL)
+    {
+        return;
+    }
+
+    while (day_delta > 0)
+    {
+        date->day++;
+
+        if (date->day > weatherstation_days_in_month(date->year, date->month))
+        {
+            date->day = 1;
+            date->month++;
+
+            if (date->month > 12)
+            {
+                date->month = 1;
+                date->year++;
+            }
+        }
+
+        day_delta--;
+    }
+
+    while (day_delta < 0)
+    {
+        date->day--;
+
+        if (date->day < 1)
+        {
+            date->month--;
+
+            if (date->month < 1)
+            {
+                date->month = 12;
+                date->year--;
+            }
+
+            date->day = weatherstation_days_in_month(date->year, date->month);
+        }
+
+        day_delta++;
+    }
+}
+
+static bool weatherstation_adjust_iso_minutes(const char *input,  int minute_offset,  char *output,  size_t output_size)
+{
+    if (input == NULL || output == NULL || output_size == 0U)
+    {
+        return false;
+    }
+
+    weatherstation_date_t date = {0};
+    int hour = 0;
+    int minute = 0;
+
+    if (sscanf(input, "%d-%d-%dT%d:%d", &date.year, &date.month, &date.day, &hour, &minute) != 5)
+    {
+        return false;
+    }
+
+    int days_in_month = weatherstation_days_in_month(date.year, date.month);
+
+    if (days_in_month == 0 || date.day < 1 || date.day > days_in_month || hour < 0 || hour > 23 || minute < 0 || minute > 59)
+    {
+        return false;
+    }
+
+    int total_minutes = hour * 60 + minute + minute_offset;
+
+    while (total_minutes < 0)
+    {
+        total_minutes += 24 * 60;
+        weatherstation_shift_date(&date, -1);
+    }
+
+    while (total_minutes >= 24 * 60)
+    {
+        total_minutes -= 24 * 60;
+        weatherstation_shift_date(&date, 1);
+    }
+
+    hour = total_minutes / 60;
+    minute = total_minutes % 60;
+
+    int written = snprintf(output, output_size, "%04d-%02d-%02dT%02d:%02d", date.year, date.month, date.day, hour, minute);
+
+    return written > 0 && written < (int)output_size;
+}
+
+static const char *weatherstation_json_string_at(cJSON *array, int index)
+{
+    if (!cJSON_IsArray(array) || index < 0)
+    {
+        return NULL;
+    }
+
+    cJSON *item = cJSON_GetArrayItem(array, index);
+
+    return cJSON_IsString(item) && item->valuestring != NULL ? item->valuestring : NULL;
+}
+
+static int weatherstation_find_daily_index(cJSON *dates, const char *current_time)
+{
+    if (!cJSON_IsArray(dates) || current_time == NULL || strlen(current_time) < 10U)
+    {
+        return -1;
+    }
+
+    int count = cJSON_GetArraySize(dates);
+
+    for (int index = 0; index < count; index++)
+    {
+        const char *date_text = weatherstation_json_string_at(dates, index);
+
+        if (date_text != NULL && strncmp(date_text, current_time, 10U) == 0)
+        {
+            return index;
+        }
+    }
+
+    return -1;
+}
+
+/*static bool weatherstation_format_hour_text(const char *api_time_text, char *output, size_t output_size)
 {
     if (output == NULL || output_size == 0U)
     {
@@ -136,7 +291,7 @@ static bool weatherstation_format_hour_text(const char *api_time_text, char *out
 
     snprintf(output, output_size, "%02d %s", hour_12, is_pm ? "PM" : "AM");
     return true;
-}
+}*/
 
 static const char *weatherstation_wind_cardinal(int direction_degrees)
 {
@@ -420,12 +575,11 @@ static bool weatherstation_response_reset(void)
     s_response_length = 0U;
     s_response_overflow = false;
 
-    if (!weatherstation_response_reserve(WEATHER_RESPONSE_INITIAL_SIZE))
+    if (s_response_buffer != NULL && s_response_capacity > 0U)
     {
-        return false;
+        s_response_buffer[0] = '\0';
     }
 
-    s_response_buffer[0] = '\0';
     return true;
 }
 
@@ -494,7 +648,7 @@ static void weatherstation_print_json(const char *json_text, size_t json_length)
 /*                              JSON parsing                                  */
 /* -------------------------------------------------------------------------- */
 
-static size_t weatherstation_smallest_array_size(cJSON *array_1, cJSON *array_2, cJSON *array_3, cJSON *array_4)
+/*static size_t weatherstation_smallest_array_size(cJSON *array_1, cJSON *array_2, cJSON *array_3, cJSON *array_4)
 {
     int size_1 = cJSON_GetArraySize(array_1);
     int size_2 = cJSON_GetArraySize(array_2);
@@ -519,9 +673,9 @@ static size_t weatherstation_smallest_array_size(cJSON *array_1, cJSON *array_2,
     }
 
     return smallest > 0 ? (size_t)smallest : 0U;
-}
+}*/
 
-static size_t weatherstation_parse_hourly_forecast(cJSON *root, const char *current_time, weatherstation_update_t *update)
+/*static size_t weatherstation_parse_hourly_forecast(cJSON *root, const char *current_time, weatherstation_update_t *update)
 {
     if (root == NULL || current_time == NULL || update == NULL)
     {
@@ -570,10 +724,7 @@ static size_t weatherstation_parse_hourly_forecast(cJSON *root, const char *curr
             continue;
         }
 
-        /*
-         * Open-Meteo returns local ISO-8601 strings in the same timezone and
-         * fixed format. Lexicographical order therefore matches time order.
-         */
+        //Open-Meteo returns local ISO-8601 strings in the same timezone andfixed format. Lexicographical order therefore matches time order.
         if (strcmp(time_value->valuestring, current_time) <= 0)
         {
             continue;
@@ -595,38 +746,107 @@ static size_t weatherstation_parse_hourly_forecast(cJSON *root, const char *curr
     }
 
     return forecast_count;
-}
+}*/
 
 static void weatherstation_parse_astro(cJSON *root, weatherstation_update_t *update)
 {
-    cJSON *daily = cJSON_GetObjectItemCaseSensitive(root, "daily");
-
-    if (!cJSON_IsObject(daily))
+    if (root == NULL || update == NULL || update->current_time[0] == '\0')
     {
         return;
     }
 
+    cJSON *daily = cJSON_GetObjectItemCaseSensitive(root, "daily");
+
+    if (!cJSON_IsObject(daily))
+    {
+        ESP_LOGW(TAG, "Open-Meteo JSON has no daily object");
+        return;
+    }
+
+    cJSON *date_values = cJSON_GetObjectItemCaseSensitive(daily, "time");
     cJSON *sunrise_values = cJSON_GetObjectItemCaseSensitive(daily, "sunrise");
     cJSON *sunset_values = cJSON_GetObjectItemCaseSensitive(daily, "sunset");
 
-    if (cJSON_IsArray(sunrise_values))
+    if (!cJSON_IsArray(date_values) || !cJSON_IsArray(sunrise_values) || !cJSON_IsArray(sunset_values))
     {
-        cJSON *sunrise = cJSON_GetArrayItem(sunrise_values, 0);
+        ESP_LOGW(TAG, "Open-Meteo daily astronomy arrays are incomplete");
+        return;
+    }
 
-        if (cJSON_IsString(sunrise) && sunrise->valuestring != NULL)
+    int today_index = weatherstation_find_daily_index(date_values, update->current_time);
+
+    if (today_index < 0)
+    {
+        ESP_LOGW(TAG, "Could not match current date to Open-Meteo daily astronomy data");
+        return;
+    }
+
+    const char *today_sunrise = weatherstation_json_string_at(sunrise_values, today_index);
+    const char *today_sunset = weatherstation_json_string_at(sunset_values, today_index);
+
+    if (today_sunrise == NULL || today_sunset == NULL)
+    {
+        ESP_LOGW(TAG, "Today's sunrise or sunset is unavailable");
+        return;
+    }
+
+    weatherstation_copy_text(update->sunrise_time, sizeof(update->sunrise_time), today_sunrise);
+    weatherstation_copy_text(update->sunset_time, sizeof(update->sunset_time), today_sunset);
+
+    char today_moonrise[WEATHERSTATION_ISO_TIME_LENGTH] = "";
+    char today_moonset[WEATHERSTATION_ISO_TIME_LENGTH] = "";
+
+    if (!weatherstation_adjust_iso_minutes(today_sunset,
+                                           WEATHER_MOON_OFFSET_MINUTES,
+                                           today_moonrise,
+                                           sizeof(today_moonrise)) ||
+        !weatherstation_adjust_iso_minutes(today_sunrise,
+                                           -WEATHER_MOON_OFFSET_MINUTES,
+                                           today_moonset,
+                                           sizeof(today_moonset)))
+    {
+        ESP_LOGW(TAG, "Could not derive assumed Moon times");
+        return;
+    }
+
+    /*
+     * Before today's assumed moonset, continue the interval that started after
+     * yesterday's sunset. Otherwise cache tonight's upcoming interval.
+     */
+    if (strcmp(update->current_time, today_moonset) <= 0)
+    {
+        const char *previous_sunset = weatherstation_json_string_at(sunset_values, today_index - 1);
+
+        if (previous_sunset != NULL &&
+            weatherstation_adjust_iso_minutes(previous_sunset,
+                                              WEATHER_MOON_OFFSET_MINUTES,
+                                              update->moonrise_time,
+                                              sizeof(update->moonrise_time)))
         {
-            weatherstation_copy_text(update->sunrise_time, sizeof(update->sunrise_time), sunrise->valuestring);
+            weatherstation_copy_text(update->moonset_time,
+                                     sizeof(update->moonset_time),
+                                     today_moonset);
+        }
+    }
+    else
+    {
+        const char *next_sunrise = weatherstation_json_string_at(sunrise_values, today_index + 1);
+
+        if (next_sunrise != NULL &&
+            weatherstation_adjust_iso_minutes(next_sunrise,
+                                              -WEATHER_MOON_OFFSET_MINUTES,
+                                              update->moonset_time,
+                                              sizeof(update->moonset_time)))
+        {
+            weatherstation_copy_text(update->moonrise_time,
+                                     sizeof(update->moonrise_time),
+                                     today_moonrise);
         }
     }
 
-    if (cJSON_IsArray(sunset_values))
+    if (update->moonrise_time[0] == '\0' || update->moonset_time[0] == '\0')
     {
-        cJSON *sunset = cJSON_GetArrayItem(sunset_values, 0);
-
-        if (cJSON_IsString(sunset) && sunset->valuestring != NULL)
-        {
-            weatherstation_copy_text(update->sunset_time, sizeof(update->sunset_time), sunset->valuestring);
-        }
+        ESP_LOGW(TAG, "Could not create the assumed Moon interval");
     }
 }
 
@@ -676,10 +896,7 @@ static bool weatherstation_parse_and_publish(const char *json_text, size_t json_
     cJSON *wind_speed_value = cJSON_GetObjectItemCaseSensitive(current, "wind_speed_10m");
     cJSON *wind_direction_value = cJSON_GetObjectItemCaseSensitive(current, "wind_direction_10m");
 
-    if (!cJSON_IsString(current_time) || current_time->valuestring == NULL ||
-        !cJSON_IsNumber(temperature) || !cJSON_IsNumber(is_day_value) ||
-        !cJSON_IsNumber(weather_code_value) || !cJSON_IsNumber(wind_speed_value) ||
-        !cJSON_IsNumber(wind_direction_value))
+    if (!cJSON_IsString(current_time) || current_time->valuestring == NULL || !cJSON_IsNumber(temperature) || !cJSON_IsNumber(is_day_value) || !cJSON_IsNumber(weather_code_value) || !cJSON_IsNumber(wind_speed_value) || !cJSON_IsNumber(wind_direction_value))
     {
         ESP_LOGE(TAG, "Open-Meteo current object is missing required values");
         goto cleanup;
@@ -701,7 +918,7 @@ static bool weatherstation_parse_and_publish(const char *json_text, size_t json_
     update.icon_path = weatherstation_select_icon(update.weather_code, update.is_day);
 
     weatherstation_parse_astro(root, &update);
-    update.hourly_count = weatherstation_parse_hourly_forecast(root, update.current_time, &update);
+    //update.hourly_count = weatherstation_parse_hourly_forecast(root, update.current_time, &update);
     parsed = true;
 
 cleanup:
@@ -723,13 +940,15 @@ cleanup:
              update.wind_direction,
              update.wind_direction_degrees);
 
-    ESP_LOGI(TAG, "Astro: sunrise=%s | sunset=%s",
+    ESP_LOGI(TAG, "Astro: sunrise=%s | sunset=%s | assumed moonrise=%s | assumed moonset=%s",
              update.sunrise_time[0] != '\0' ? update.sunrise_time : "unavailable",
-             update.sunset_time[0] != '\0' ? update.sunset_time : "unavailable");
+             update.sunset_time[0] != '\0' ? update.sunset_time : "unavailable",
+             update.moonrise_time[0] != '\0' ? update.moonrise_time : "unavailable",
+             update.moonset_time[0] != '\0' ? update.moonset_time : "unavailable");
 
-    ESP_LOGI(TAG, "Hourly forecast cards: %u", (unsigned int)update.hourly_count);
+    //ESP_LOGI(TAG, "Hourly forecast cards: %u", (unsigned int)update.hourly_count);
 
-    for (size_t index = 0U; index < update.hourly_count; index++)
+    /*for (size_t index = 0U; index < update.hourly_count; index++)
     {
         const weatherstation_hourly_forecast_t *slot = &update.hourly[index];
 
@@ -739,7 +958,7 @@ cleanup:
                  (double)slot->temperature_c,
                  slot->weather_code,
                  slot->condition);
-    }
+    }*/
 
     if (s_update_callback != NULL)
     {
@@ -753,7 +972,7 @@ cleanup:
 /*                             Request task                                   */
 /* -------------------------------------------------------------------------- */
 
-static esp_err_t weatherstation_request_once(void)
+static esp_err_t weatherstation_perform_request(void)
 {
     char request_url[640];
 
@@ -764,9 +983,10 @@ static esp_err_t weatherstation_request_once(void)
         "?latitude=%.6f"
         "&longitude=%.6f"
         "&current=temperature_2m,is_day,weather_code,wind_speed_10m,wind_direction_10m"
-        "&hourly=temperature_2m,is_day,weather_code"
+        //"&hourly=temperature_2m,is_day,weather_code"
         "&daily=sunrise,sunset"
-        "&forecast_hours=6"
+        "&past_days=1"
+        "&forecast_days=2"
         "&timezone=auto",
         s_latitude,
         s_longitude
@@ -847,62 +1067,67 @@ static esp_err_t weatherstation_request_once(void)
     return result;
 }
 
-static void weatherstation_update_task(void *argument)
-{
-    (void)argument;
-
-    while (true)
-    {
-        esp_err_t result = weatherstation_request_once();
-        TickType_t delay_ticks = result == ESP_OK
-                                     ? pdMS_TO_TICKS(WEATHER_NORMAL_UPDATE_MS)
-                                     : pdMS_TO_TICKS(WEATHER_ERROR_RETRY_MS);
-
-        if (result != ESP_OK)
-        {
-            ESP_LOGW(TAG, "Weather update failed; retrying in one minute");
-        }
-
-        vTaskDelay(delay_ticks);
-    }
-}
-
-esp_err_t weatherstation_start_task(double latitude, double longitude, const char *location_name, weatherstation_update_callback_t callback, void *user_data)
+esp_err_t weatherstation_init(double latitude,
+                              double longitude,
+                              const char *location_name,
+                              weatherstation_update_callback_t callback,
+                              void *user_data)
 {
     if (latitude < -90.0 || latitude > 90.0 ||
         longitude < -180.0 || longitude > 180.0 ||
-        location_name == NULL || callback == NULL)
+        location_name == NULL ||
+        callback == NULL)
     {
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (s_update_task_handle != NULL)
+    if (s_request_in_progress)
     {
         return ESP_ERR_INVALID_STATE;
     }
 
     s_latitude = latitude;
     s_longitude = longitude;
-    weatherstation_copy_text(s_location_name, sizeof(s_location_name), location_name);
+
+    weatherstation_copy_text(
+        s_location_name,
+        sizeof(s_location_name),
+        location_name
+    );
 
     s_update_callback = callback;
     s_callback_user_data = user_data;
+    s_initialized = true;
 
-    BaseType_t task_result = xTaskCreate(
-        weatherstation_update_task,
-        "weatherstation_update",
-        WEATHER_TASK_STACK_SIZE,
-        NULL,
-        WEATHER_TASK_PRIORITY,
-        &s_update_task_handle
+    ESP_LOGI(
+        TAG,
+        "Open-Meteo configured for %.6f, %.6f",
+        s_latitude,
+        s_longitude
     );
 
-    if (task_result != pdPASS)
+    return ESP_OK;
+}
+
+esp_err_t weatherstation_request_once(void)
+{
+    if (!s_initialized ||
+        s_update_callback == NULL)
     {
-        s_update_task_handle = NULL;
-        return ESP_ERR_NO_MEM;
+        return ESP_ERR_INVALID_STATE;
     }
 
-    ESP_LOGI(TAG, "Open-Meteo task started for %.6f, %.6f", s_latitude, s_longitude);
-    return ESP_OK;
+    if (s_request_in_progress)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_request_in_progress = true;
+
+    esp_err_t result =
+        weatherstation_perform_request();
+
+    s_request_in_progress = false;
+
+    return result;
 }
