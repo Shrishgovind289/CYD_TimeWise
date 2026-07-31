@@ -40,12 +40,12 @@
 static const char *TAG = "TimeWise";
 
 /* Keep private credentials only in your local project. */
-#define WIFI_SSID                       "TP-195_2"
-#define WIFI_PASS                       "Porsche@911_GT"
+#define WIFI_SSID                       "WiFi_SSID"
+#define WIFI_PASS                       "WiFi_Password"
 
-#define WEATHER_LATITUDE                40.7282
-#define WEATHER_LONGITUDE              -74.0776
-#define WEATHER_LOCATION_NAME          "Jersey City, New Jersey"
+#define WEATHER_LATITUDE                Latitude
+#define WEATHER_LONGITUDE               Longitude
+#define WEATHER_LOCATION_NAME          "Location"
 
 #define LOCAL_TIMEZONE                  "EST5EDT,M3.2.0/2,M11.1.0/2"
 
