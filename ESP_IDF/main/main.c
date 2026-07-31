@@ -635,8 +635,8 @@ void app_main(void)
     }
 
     //Alarm
-    g_alarm_hour = 8;
-    g_alarm_minute = 30;
+    g_alarm_hour = 7;
+    g_alarm_minute = 45;
     g_alarm_enabled = true;
 
     //Scheduler state
