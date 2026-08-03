@@ -5,8 +5,9 @@
  *
  *   - Read local NTP time every second.
  *   - Update time/date once per minute.
- *   - Start the alarm at HH:MM:05.
- *   - Stop the second alarm play at second 50.
+ *   - Start the daily alarm at HH:MM:05.
+ *   - Start a snoozed alarm when its absolute snooze time is due.
+ *   - Stop any alarm 45 seconds after its actual trigger time.
  *   - Request weather once every 30 minutes.
  *   - Change weather, wind, icon and background only after a successful
  *     weather request.
@@ -36,16 +37,17 @@
 #include "SDCard.h"
 #include "TFT_Display.h"
 #include "WeatherStation.h"
+#include "WebSocketControl.h"
 
 static const char *TAG = "TimeWise";
 
 /* Keep private credentials only in your local project. */
-#define WIFI_SSID                       "WiFi_SSID"
-#define WIFI_PASS                       "WiFi_Password"
+#define WIFI_SSID                       "TP-195_2"
+#define WIFI_PASS                       "Porsche@911_GT"
 
-#define WEATHER_LATITUDE                Latitude
-#define WEATHER_LONGITUDE               Longitude
-#define WEATHER_LOCATION_NAME          "Location"
+#define WEATHER_LATITUDE                40.7282
+#define WEATHER_LONGITUDE              -74.0776
+#define WEATHER_LOCATION_NAME          "Jersey City, New Jersey"
 
 #define LOCAL_TIMEZONE                  "EST5EDT,M3.2.0/2,M11.1.0/2"
 
@@ -59,7 +61,8 @@ static const char *TAG = "TimeWise";
 #define VALID_LOCAL_YEAR                2024
 
 #define ALARM_START_SECOND              5
-#define ALARM_STOP_SECOND               50
+#define ALARM_START_WINDOW_END_SECOND   50
+#define ALARM_RING_DURATION_SECONDS     45
 
 /*
  * Weather is requested at minute 00 and minute 30 after second 50.
@@ -156,6 +159,9 @@ static void wifi_event_handler(void *handler_argument, esp_event_base_t event_ba
 
     if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
     {
+        const ip_event_got_ip_t *got_ip_event =
+            (const ip_event_got_ip_t *)event_data;
+
         s_wifi_retry_count = 0;
 
         if (s_wifi_event_group != NULL)
@@ -171,7 +177,16 @@ static void wifi_event_handler(void *handler_argument, esp_event_base_t event_ba
             );
         }
 
-        ESP_LOGI(TAG, "Wi-Fi connected and IP received");
+        if (got_ip_event != NULL)
+        {
+            ESP_LOGI(TAG,
+                     "Wi-Fi connected: http://" IPSTR "/",
+                     IP2STR(&got_ip_event->ip_info.ip));
+        }
+        else
+        {
+            ESP_LOGI(TAG, "Wi-Fi connected and IP received");
+        }
     }
 }
 
@@ -635,15 +650,27 @@ void app_main(void)
     }
 
     //Alarm
-    g_alarm_hour = 7;
-    g_alarm_minute = 45;
-    g_alarm_enabled = true;
+    ESP_ERROR_CHECK(ntpclock_set_alarm(7, 45, true));
+
+    //WebSocket and mobile control page
+    esp_err_t websocket_result = websocket_control_start();
+
+    if (websocket_result != ESP_OK)
+    {
+        ESP_LOGE(
+            TAG,
+            "WebSocket control server failed: %s",
+            esp_err_to_name(websocket_result)
+        );
+
+        return;
+    }
 
     //Scheduler state
     int64_t last_display_minute = -1;
-    int64_t last_alarm_day = -1;
-    int64_t last_alarm_stop_minute = -1;
+    int64_t last_alarm_minute = -1;
     int64_t last_weather_slot = -1;
+    time_t alarm_stop_deadline = 0;
 
     //Request weather once immediately after startup.
     s_weather_request_due = true;
@@ -677,8 +704,7 @@ void app_main(void)
         }
 
         int64_t minute_key = make_minute_key(&now);
-
-        int64_t day_key = make_day_key(&now);
+        time_t current_time = time(NULL);
 
         //Update time/date
         if (minute_key != last_display_minute)
@@ -695,24 +721,53 @@ void app_main(void)
             );
         }
 
-        //Start alarm
-        if (g_alarm_enabled && now.tm_hour == g_alarm_hour && now.tm_min == g_alarm_minute && now.tm_sec >= ALARM_START_SECOND && now.tm_sec < ALARM_STOP_SECOND && day_key != last_alarm_day)
+        int alarm_hour;
+        int alarm_minute;
+        bool alarm_enabled;
+
+        ntpclock_get_alarm(
+            &alarm_hour,
+            &alarm_minute,
+            &alarm_enabled
+        );
+
+        bool regular_alarm_due =
+            alarm_enabled &&
+            now.tm_hour == alarm_hour &&
+            now.tm_min == alarm_minute &&
+            now.tm_sec >= ALARM_START_SECOND &&
+            now.tm_sec < ALARM_START_WINDOW_END_SECOND &&
+            minute_key != last_alarm_minute;
+
+        bool snooze_alarm_due =
+            ntpclock_snooze_is_due(current_time);
+
+        if ((regular_alarm_due || snooze_alarm_due) &&
+            !ntpclock_alarm_is_ringing() &&
+            !audio_is_playing())
         {
             esp_err_t alarm_result = ntpclock_trigger_alarm_now();
 
             if (alarm_result == ESP_OK)
             {
-                last_alarm_day = day_key;
+                if (regular_alarm_due)
+                {
+                    last_alarm_minute = minute_key;
+                }
+
+                alarm_stop_deadline =
+                    current_time + ALARM_RING_DURATION_SECONDS;
 
                 ESP_LOGI(
                     TAG,
-                    "Alarm started at %02d:%02d:%02d",
+                    "%s alarm started at %02d:%02d:%02d",
+                    snooze_alarm_due ? "Snoozed" : "Daily",
                     now.tm_hour,
                     now.tm_min,
                     now.tm_sec
                 );
             }
-            else
+            else if (alarm_result != ESP_ERR_INVALID_STATE)
             {
                 ESP_LOGE(
                     TAG,
@@ -722,8 +777,8 @@ void app_main(void)
             }
         }
 
-        //Stop alarm
-        if (now.tm_sec >= ALARM_STOP_SECOND && minute_key != last_alarm_stop_minute)
+        if (alarm_stop_deadline > 0 &&
+            current_time >= alarm_stop_deadline)
         {
             if (ntpclock_alarm_is_ringing() || audio_is_playing())
             {
@@ -731,13 +786,21 @@ void app_main(void)
 
                 ESP_LOGI(
                     TAG,
-                    "Alarm stop requested at %02d:%02d:%02d",
+                    "Alarm timeout stop requested at %02d:%02d:%02d",
                     now.tm_hour,
                     now.tm_min,
                     now.tm_sec
                 );
             }
-            last_alarm_stop_minute = minute_key;
+
+            alarm_stop_deadline = 0;
+        }
+        else if (alarm_stop_deadline > 0 &&
+                 !ntpclock_alarm_is_ringing() &&
+                 !audio_is_playing())
+        {
+            /* Stop or Snooze ended playback before the 45-second deadline. */
+            alarm_stop_deadline = 0;
         }
 
         //Apply a completed request only while alarm audio is idle.
@@ -784,7 +847,9 @@ void app_main(void)
             }
         }
 
-        //Start alarm
-        vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(MAIN_LOOP_PERIOD_MS));
+        vTaskDelayUntil(
+            &last_wake_time,
+            pdMS_TO_TICKS(MAIN_LOOP_PERIOD_MS)
+        );
     }
 }

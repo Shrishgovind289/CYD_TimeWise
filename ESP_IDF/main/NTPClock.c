@@ -23,40 +23,51 @@ static const char *TAG = "NTPClock";
 #define NTPCLOCK_ALARM_TASK_PRIORITY     4U
 #define NTPCLOCK_ALARM_PLAY_COUNT        2U
 
+#define NTPCLOCK_SNOOZE_MIN_MINUTES      1U
+#define NTPCLOCK_SNOOZE_MAX_MINUTES      60U
+#define NTPCLOCK_DEFAULT_SNOOZE_MINUTES  5U
+
 static ntpclock_update_callback_t s_update_callback = NULL;
 static void *s_update_user_data = NULL;
 static TaskHandle_t s_clock_task_handle = NULL;
 
-volatile int g_alarm_hour;
-volatile int g_alarm_minute;
-volatile bool g_alarm_enabled = false;
+volatile int g_alarm_hour = 7;
+volatile int g_alarm_minute = 45;
+volatile bool g_alarm_enabled = true;
+volatile uint32_t g_alarm_snooze_minutes = NTPCLOCK_DEFAULT_SNOOZE_MINUTES;
+
 static volatile bool s_alarm_ringing = false;
 static volatile bool s_alarm_stop_requested = false;
 static TaskHandle_t s_alarm_task_handle = NULL;
 
-/* Prevents the same daily alarm from triggering repeatedly during its minute. */
-static int s_last_alarm_year = -1;
-static int s_last_alarm_yday = -1;
+static time_t s_alarm_snooze_until = 0;
+static portMUX_TYPE s_alarm_lock = portMUX_INITIALIZER_UNLOCKED;
 
-static bool ntpclock_time_is_valid_tm(const struct tm *timeinfo)
+static bool ntpclock_time_is_valid_tm(const struct tm *time_info)
 {
-    if (timeinfo == NULL)
+    if (time_info == NULL)
     {
         return false;
     }
 
-    return timeinfo->tm_year >= (NTPCLOCK_VALID_YEAR - 1900);
+    return time_info->tm_year >= (NTPCLOCK_VALID_YEAR - 1900);
 }
 
 static bool ntpclock_time_is_valid(void)
 {
-    time_t now = 0;
-    struct tm timeinfo = {0};
+    time_t current_time = 0;
+    struct tm time_info = {0};
 
-    time(&now);
-    localtime_r(&now, &timeinfo);
+    time(&current_time);
+    localtime_r(&current_time, &time_info);
 
-    return ntpclock_time_is_valid_tm(&timeinfo);
+    return ntpclock_time_is_valid_tm(&time_info);
+}
+
+static void ntpclock_request_alarm_stop(void)
+{
+    s_alarm_stop_requested = true;
+    audio_stop();
 }
 
 static void ntpclock_alarm_playback_task(void *argument)
@@ -68,7 +79,9 @@ static void ntpclock_alarm_playback_task(void *argument)
              ALARM_FILE_PATH,
              (unsigned int)NTPCLOCK_ALARM_PLAY_COUNT);
 
-    for (unsigned int play_index = 0; play_index < NTPCLOCK_ALARM_PLAY_COUNT; play_index++)
+    for (unsigned int play_index = 0U;
+         play_index < NTPCLOCK_ALARM_PLAY_COUNT;
+         play_index++)
     {
         if (s_alarm_stop_requested)
         {
@@ -91,9 +104,13 @@ static void ntpclock_alarm_playback_task(void *argument)
         }
     }
 
+    portENTER_CRITICAL(&s_alarm_lock);
+
     s_alarm_ringing = false;
     s_alarm_stop_requested = false;
     s_alarm_task_handle = NULL;
+
+    portEXIT_CRITICAL(&s_alarm_lock);
 
     ESP_LOGI(TAG, "Alarm playback finished");
 
@@ -102,7 +119,15 @@ static void ntpclock_alarm_playback_task(void *argument)
 
 static esp_err_t ntpclock_start_alarm_playback(void)
 {
-    if (s_alarm_ringing || s_alarm_task_handle != NULL)
+    bool alarm_busy;
+
+    portENTER_CRITICAL(&s_alarm_lock);
+
+    alarm_busy = s_alarm_ringing || s_alarm_task_handle != NULL;
+
+    portEXIT_CRITICAL(&s_alarm_lock);
+
+    if (alarm_busy)
     {
         return ESP_ERR_INVALID_STATE;
     }
@@ -113,8 +138,12 @@ static esp_err_t ntpclock_start_alarm_playback(void)
         return ESP_ERR_INVALID_STATE;
     }
 
+    portENTER_CRITICAL(&s_alarm_lock);
+
     s_alarm_stop_requested = false;
     s_alarm_ringing = true;
+
+    portEXIT_CRITICAL(&s_alarm_lock);
 
     BaseType_t task_result = xTaskCreate(
         ntpclock_alarm_playback_task,
@@ -127,46 +156,21 @@ static esp_err_t ntpclock_start_alarm_playback(void)
 
     if (task_result != pdPASS)
     {
+        portENTER_CRITICAL(&s_alarm_lock);
+
         s_alarm_ringing = false;
         s_alarm_task_handle = NULL;
+
+        portEXIT_CRITICAL(&s_alarm_lock);
 
         ESP_LOGE(TAG, "Failed to create alarm playback task");
         return ESP_ERR_NO_MEM;
     }
 
+    /* Any successful alarm start consumes a pending snooze. */
+    ntpclock_clear_snooze();
+
     return ESP_OK;
-}
-
-static void ntpclock_check_alarm(const struct tm *timeinfo)
-{
-    if (!g_alarm_enabled || !ntpclock_time_is_valid_tm(timeinfo))
-    {
-        return;
-    }
-
-    if (timeinfo->tm_hour != g_alarm_hour || timeinfo->tm_min != g_alarm_minute)
-    {
-        return;
-    }
-
-    if (timeinfo->tm_year == s_last_alarm_year &&
-        timeinfo->tm_yday == s_last_alarm_yday)
-    {
-        return;
-    }
-
-    esp_err_t result = ntpclock_start_alarm_playback();
-
-    if (result == ESP_OK)
-    {
-        s_last_alarm_year = timeinfo->tm_year;
-        s_last_alarm_yday = timeinfo->tm_yday;
-
-        ESP_LOGI(TAG,
-                 "Daily alarm triggered at %02d:%02d",
-                 g_alarm_hour,
-                 g_alarm_minute);
-    }
 }
 
 esp_err_t ntpclock_init(const char *timezone, int retry_count)
@@ -204,20 +208,20 @@ esp_err_t ntpclock_init(const char *timezone, int retry_count)
         return ESP_ERR_TIMEOUT;
     }
 
-    time_t now = 0;
-    struct tm timeinfo = {0};
+    time_t current_time = 0;
+    struct tm time_info = {0};
 
-    time(&now);
-    localtime_r(&now, &timeinfo);
+    time(&current_time);
+    localtime_r(&current_time, &time_info);
 
     ESP_LOGI(TAG,
              "NTP synchronized: %04d-%02d-%02d %02d:%02d:%02d",
-             timeinfo.tm_year + 1900,
-             timeinfo.tm_mon + 1,
-             timeinfo.tm_mday,
-             timeinfo.tm_hour,
-             timeinfo.tm_min,
-             timeinfo.tm_sec);
+             time_info.tm_year + 1900,
+             time_info.tm_mon + 1,
+             time_info.tm_mday,
+             time_info.tm_hour,
+             time_info.tm_min,
+             time_info.tm_sec);
 
     return ESP_OK;
 }
@@ -231,19 +235,16 @@ static void ntpclock_update_task(void *argument)
 
     while (true)
     {
-        time_t now = 0;
-        struct tm timeinfo = {0};
+        time_t current_time = 0;
+        struct tm time_info = {0};
 
-        time(&now);
-        localtime_r(&now, &timeinfo);
+        time(&current_time);
+        localtime_r(&current_time, &time_info);
 
-        if (ntpclock_time_is_valid_tm(&timeinfo))
+        if (ntpclock_time_is_valid_tm(&time_info))
         {
-            strftime(time_text, sizeof(time_text), "%I:%M %p", &timeinfo);
-            strftime(date_text, sizeof(date_text), "%a, %b %d", &timeinfo);
-
-            /* The alarm time comparison lives inside the NTP clock task. */
-            ntpclock_check_alarm(&timeinfo);
+            strftime(time_text, sizeof(time_text), "%I:%M %p", &time_info);
+            strftime(date_text, sizeof(date_text), "%a, %b %d", &time_info);
         }
         else
         {
@@ -295,27 +296,65 @@ esp_err_t ntpclock_set_alarm(int hour_24, int minute, bool enabled)
         return ESP_ERR_INVALID_ARG;
     }
 
+    portENTER_CRITICAL(&s_alarm_lock);
+
     g_alarm_hour = hour_24;
     g_alarm_minute = minute;
     g_alarm_enabled = enabled;
+    s_alarm_snooze_until = 0;
 
-    /* Allow the newly configured alarm to trigger for the current date. */
-    s_last_alarm_year = -1;
-    s_last_alarm_yday = -1;
+    portEXIT_CRITICAL(&s_alarm_lock);
 
     ESP_LOGI(TAG,
              "Alarm configured: %02d:%02d, enabled=%s, WAV repeats=%u",
-             g_alarm_hour,
-             g_alarm_minute,
-             g_alarm_enabled ? "true" : "false",
+             hour_24,
+             minute,
+             enabled ? "true" : "false",
              (unsigned int)NTPCLOCK_ALARM_PLAY_COUNT);
 
     return ESP_OK;
 }
 
+void ntpclock_get_alarm(int *hour_24, int *minute, bool *enabled)
+{
+    int saved_hour;
+    int saved_minute;
+    bool saved_enabled;
+
+    portENTER_CRITICAL(&s_alarm_lock);
+
+    saved_hour = g_alarm_hour;
+    saved_minute = g_alarm_minute;
+    saved_enabled = g_alarm_enabled;
+
+    portEXIT_CRITICAL(&s_alarm_lock);
+
+    if (hour_24 != NULL)
+    {
+        *hour_24 = saved_hour;
+    }
+
+    if (minute != NULL)
+    {
+        *minute = saved_minute;
+    }
+
+    if (enabled != NULL)
+    {
+        *enabled = saved_enabled;
+    }
+}
+
 void ntpclock_enable_alarm(bool enabled)
 {
-    g_alarm_enabled = enabled;
+    int hour;
+    int minute;
+    bool current_enabled;
+
+    ntpclock_get_alarm(&hour, &minute, &current_enabled);
+    (void)current_enabled;
+
+    ntpclock_set_alarm(hour, minute, enabled);
 }
 
 bool ntpclock_alarm_is_ringing(void)
@@ -323,20 +362,104 @@ bool ntpclock_alarm_is_ringing(void)
     return s_alarm_ringing;
 }
 
+esp_err_t ntpclock_trigger_alarm_now(void)
+{
+    return ntpclock_start_alarm_playback();
+}
+
 void ntpclock_stop_alarm(void)
 {
-    if (!s_alarm_ringing)
+    ntpclock_clear_snooze();
+
+    if (!s_alarm_ringing && !audio_is_playing())
     {
         return;
     }
 
-    s_alarm_stop_requested = true;
-    audio_stop();
+    ntpclock_request_alarm_stop();
 
     ESP_LOGI(TAG, "Alarm stop requested");
 }
 
-esp_err_t ntpclock_trigger_alarm_now(void)
+esp_err_t ntpclock_snooze_alarm(uint32_t snooze_minutes)
 {
-    return ntpclock_start_alarm_playback();
+    if (!s_alarm_ringing && !audio_is_playing())
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (snooze_minutes < NTPCLOCK_SNOOZE_MIN_MINUTES)
+    {
+        snooze_minutes = NTPCLOCK_SNOOZE_MIN_MINUTES;
+    }
+    else if (snooze_minutes > NTPCLOCK_SNOOZE_MAX_MINUTES)
+    {
+        snooze_minutes = NTPCLOCK_SNOOZE_MAX_MINUTES;
+    }
+
+    time_t current_time = time(NULL);
+    time_t snooze_until = current_time + (time_t)(snooze_minutes * 60U);
+
+    portENTER_CRITICAL(&s_alarm_lock);
+
+    g_alarm_snooze_minutes = snooze_minutes;
+    s_alarm_snooze_until = snooze_until;
+
+    portEXIT_CRITICAL(&s_alarm_lock);
+
+    ntpclock_request_alarm_stop();
+
+    ESP_LOGI(TAG,
+             "Alarm snoozed for %u minute(s)",
+             (unsigned int)snooze_minutes);
+
+    return ESP_OK;
+}
+
+bool ntpclock_snooze_is_pending(void)
+{
+    bool pending;
+
+    portENTER_CRITICAL(&s_alarm_lock);
+
+    pending = s_alarm_snooze_until > 0;
+
+    portEXIT_CRITICAL(&s_alarm_lock);
+
+    return pending;
+}
+
+bool ntpclock_snooze_is_due(time_t current_time)
+{
+    bool due;
+
+    portENTER_CRITICAL(&s_alarm_lock);
+
+    due = s_alarm_snooze_until > 0 && current_time >= s_alarm_snooze_until;
+
+    portEXIT_CRITICAL(&s_alarm_lock);
+
+    return due;
+}
+
+time_t ntpclock_get_snooze_until(void)
+{
+    time_t snooze_until;
+
+    portENTER_CRITICAL(&s_alarm_lock);
+
+    snooze_until = s_alarm_snooze_until;
+
+    portEXIT_CRITICAL(&s_alarm_lock);
+
+    return snooze_until;
+}
+
+void ntpclock_clear_snooze(void)
+{
+    portENTER_CRITICAL(&s_alarm_lock);
+
+    s_alarm_snooze_until = 0;
+
+    portEXIT_CRITICAL(&s_alarm_lock);
 }

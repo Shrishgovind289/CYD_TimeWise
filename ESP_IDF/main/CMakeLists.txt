@@ -8,10 +8,15 @@ idf_component_register(
         "Audio.c"
         "sun.c"
         "moon.c"
+        "WebSocketControl.c"
+       
        
     INCLUDE_DIRS "."
     REQUIRES
+        nvs_flash
         esp_wifi
+        json
+        mbedtls
         nvs_flash
         esp_netif
         esp_event

@@ -21,6 +21,7 @@
 #include "esp_timer.h"
 
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "driver/spi_master.h"
 
 #include "esp_lcd_panel_io.h"
@@ -59,9 +60,6 @@ LV_IMAGE_DECLARE(moon);
 
 #define TFT_LCD_PIXEL_CLOCK_HZ           (40 * 1000 * 1000)
 
-#define TFT_LCD_BK_LIGHT_ON_LEVEL        1
-#define TFT_LCD_BK_LIGHT_OFF_LEVEL       0
-
 #define TFT_PIN_NUM_SCLK                 14
 #define TFT_PIN_NUM_MOSI                 13
 #define TFT_PIN_NUM_MISO                 -1
@@ -69,6 +67,14 @@ LV_IMAGE_DECLARE(moon);
 #define TFT_PIN_NUM_LCD_RST              -1
 #define TFT_PIN_NUM_LCD_CS               15
 #define TFT_PIN_NUM_BK_LIGHT             27
+
+#define TFT_BACKLIGHT_LEDC_MODE          LEDC_LOW_SPEED_MODE
+#define TFT_BACKLIGHT_LEDC_TIMER         LEDC_TIMER_1
+#define TFT_BACKLIGHT_LEDC_CHANNEL       LEDC_CHANNEL_1
+#define TFT_BACKLIGHT_PWM_FREQUENCY_HZ   5000
+#define TFT_BACKLIGHT_PWM_RESOLUTION     LEDC_TIMER_10_BIT
+#define TFT_BACKLIGHT_PWM_MAX_DUTY       1023U
+#define TFT_NIGHT_BRIGHTNESS_PERCENT     60U
 
 #define TFT_LCD_H_RES                    480U
 #define TFT_LCD_V_RES                    320U
@@ -179,6 +185,12 @@ static int64_t s_moonrise_minutes = 0;
 static int64_t s_moonset_minutes = 0;
 static int64_t s_last_astro_minute = -1;
 
+
+volatile uint8_t g_display_brightness_percent = 100U;
+volatile bool g_display_is_day = true;
+
+static bool s_backlight_initialized = false;
+static portMUX_TYPE s_backlight_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static bool s_dashboard_created = false;
 
@@ -1150,6 +1162,222 @@ static void tft_dashboard_update_wind_arrow_locked(int wind_direction_degrees)
 }
 
 /* -------------------------------------------------------------------------- */
+/*                         Backlight brightness                               */
+/* -------------------------------------------------------------------------- */
+
+static uint8_t tft_display_calculate_effective_brightness(void)
+{
+    uint32_t selected_brightness;
+    bool is_day;
+
+    portENTER_CRITICAL(&s_backlight_lock);
+
+    selected_brightness = g_display_brightness_percent;
+    is_day = g_display_is_day;
+
+    portEXIT_CRITICAL(&s_backlight_lock);
+
+    if (!is_day)
+    {
+        selected_brightness =
+            (selected_brightness * TFT_NIGHT_BRIGHTNESS_PERCENT + 50U) /
+            100U;
+    }
+
+    if (selected_brightness > 100U)
+    {
+        selected_brightness = 100U;
+    }
+
+    return (uint8_t)selected_brightness;
+}
+
+static esp_err_t tft_display_apply_brightness(void)
+{
+    if (!s_backlight_initialized)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint8_t effective_brightness =
+        tft_display_calculate_effective_brightness();
+
+    uint32_t duty =
+        ((uint32_t)effective_brightness * TFT_BACKLIGHT_PWM_MAX_DUTY + 50U) /
+        100U;
+
+    return ledc_set_duty_and_update(
+        TFT_BACKLIGHT_LEDC_MODE,
+        TFT_BACKLIGHT_LEDC_CHANNEL,
+        duty,
+        0U
+    );
+}
+
+static esp_err_t tft_display_backlight_init(void)
+{
+    ledc_timer_config_t timer_configuration =
+    {
+        .speed_mode = TFT_BACKLIGHT_LEDC_MODE,
+        .duty_resolution = TFT_BACKLIGHT_PWM_RESOLUTION,
+        .timer_num = TFT_BACKLIGHT_LEDC_TIMER,
+        .freq_hz = TFT_BACKLIGHT_PWM_FREQUENCY_HZ,
+        .clk_cfg = LEDC_AUTO_CLK
+    };
+
+    esp_err_t result = ledc_timer_config(&timer_configuration);
+
+    if (result != ESP_OK)
+    {
+        return result;
+    }
+
+    ledc_channel_config_t channel_configuration =
+    {
+        .gpio_num = TFT_PIN_NUM_BK_LIGHT,
+        .speed_mode = TFT_BACKLIGHT_LEDC_MODE,
+        .channel = TFT_BACKLIGHT_LEDC_CHANNEL,
+        .intr_type = LEDC_INTR_DISABLE,
+        .timer_sel = TFT_BACKLIGHT_LEDC_TIMER,
+        .duty = 0U,
+        .hpoint = 0U
+    };
+
+    result = ledc_channel_config(&channel_configuration);
+
+    if (result != ESP_OK)
+    {
+        ESP_LOGE(
+            TAG,
+            "Backlight LEDC channel configuration failed: %s",
+            esp_err_to_name(result)
+        );
+
+        return result;
+    }
+
+    /*
+    * ledc_set_duty_and_update() uses the thread-safe LEDC fade
+    * infrastructure internally, even though TimeWise is not performing
+    * a gradual fade.
+    *
+    * Install the fade service once before the first brightness update.
+    */
+    result = ledc_fade_func_install(0);
+
+    if (result != ESP_OK)
+    {
+        ESP_LOGE(
+            TAG,
+            "Backlight LEDC fade service installation failed: %s",
+            esp_err_to_name(result)
+        );
+
+        return result;
+    }
+
+    s_backlight_initialized = true;
+
+    result = tft_display_apply_brightness();
+
+    if (result != ESP_OK)
+    {
+        ESP_LOGE(
+            TAG,
+            "Initial backlight brightness update failed: %s",
+            esp_err_to_name(result)
+        );
+
+        return result;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "Backlight PWM initialized: GPIO%d, brightness=%u%%",
+        TFT_PIN_NUM_BK_LIGHT,
+        (unsigned int)tft_display_get_effective_brightness_percent()
+    );
+
+    return ESP_OK;
+
+}
+
+void tft_display_set_brightness_percent(uint8_t brightness_percent)
+{
+    if (brightness_percent > 100U)
+    {
+        brightness_percent = 100U;
+    }
+
+    portENTER_CRITICAL(&s_backlight_lock);
+
+    g_display_brightness_percent = brightness_percent;
+
+    portEXIT_CRITICAL(&s_backlight_lock);
+
+    if (s_backlight_initialized)
+    {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(tft_display_apply_brightness());
+    }
+}
+
+uint8_t tft_display_get_brightness_percent(void)
+{
+    uint8_t brightness_percent;
+
+    portENTER_CRITICAL(&s_backlight_lock);
+
+    brightness_percent = g_display_brightness_percent;
+
+    portEXIT_CRITICAL(&s_backlight_lock);
+
+    return brightness_percent;
+}
+
+uint8_t tft_display_get_effective_brightness_percent(void)
+{
+    return tft_display_calculate_effective_brightness();
+}
+
+void tft_display_set_day_mode(bool is_day)
+{
+    bool changed;
+
+    portENTER_CRITICAL(&s_backlight_lock);
+
+    changed = g_display_is_day != is_day;
+    g_display_is_day = is_day;
+
+    portEXIT_CRITICAL(&s_backlight_lock);
+
+    if (s_backlight_initialized)
+    {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(tft_display_apply_brightness());
+    }
+
+    if (changed)
+    {
+        ESP_LOGI(TAG,
+                 "Display mode changed to %s, effective brightness=%u%%",
+                 is_day ? "day" : "night",
+                 (unsigned int)tft_display_get_effective_brightness_percent());
+    }
+}
+
+bool tft_display_is_day(void)
+{
+    bool is_day;
+
+    portENTER_CRITICAL(&s_backlight_lock);
+
+    is_day = g_display_is_day;
+
+    portEXIT_CRITICAL(&s_backlight_lock);
+
+    return is_day;
+}
+
+/* -------------------------------------------------------------------------- */
 /*                              Public API                                    */
 /* -------------------------------------------------------------------------- */
 
@@ -1160,16 +1388,7 @@ esp_err_t tft_display_init(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    gpio_config_t backlight_configuration =
-    {
-        .mode = GPIO_MODE_OUTPUT,
-
-        .pin_bit_mask = 1ULL << TFT_PIN_NUM_BK_LIGHT
-    };
-
-    ESP_ERROR_CHECK(gpio_config(&backlight_configuration));
-
-    gpio_set_level(TFT_PIN_NUM_BK_LIGHT, TFT_LCD_BK_LIGHT_OFF_LEVEL);
+    ESP_ERROR_CHECK(tft_display_backlight_init());
 
     spi_bus_config_t bus_configuration =
     {
@@ -1261,9 +1480,11 @@ esp_err_t tft_display_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    gpio_set_level(TFT_PIN_NUM_BK_LIGHT, TFT_LCD_BK_LIGHT_ON_LEVEL);
+    ESP_ERROR_CHECK(tft_display_apply_brightness());
 
-    ESP_LOGI(TAG, "TFT display initialized");
+    ESP_LOGI(TAG,
+             "TFT display initialized, brightness=%u%%",
+             (unsigned int)tft_display_get_effective_brightness_percent());
 
     return ESP_OK;
 }
@@ -1411,6 +1632,15 @@ void tft_dashboard_set_time(const char *time_text)
     int64_t current_minutes = 0;
     bool current_time_valid = tft_get_system_local_minutes(&current_minutes);
 
+    if (current_time_valid && s_sun_interval_valid)
+    {
+        bool is_day =
+            current_minutes >= s_sunrise_minutes &&
+            current_minutes < s_sunset_minutes;
+
+        tft_display_set_day_mode(is_day);
+    }
+
     _lock_acquire(&s_lvgl_api_lock);
 
     lv_label_set_text(s_time_label, time_text);
@@ -1472,6 +1702,15 @@ void tft_dashboard_set_astro(const char *current_time,
     bool moon_valid = tft_parse_iso_local_minutes(moonrise_time, &moonrise_minutes) &&
                       tft_parse_iso_local_minutes(moonset_time, &moonset_minutes) &&
                       moonset_minutes > moonrise_minutes;
+
+    if (current_valid && sun_valid)
+    {
+        bool is_day =
+            current_minutes >= sunrise_minutes &&
+            current_minutes < sunset_minutes;
+
+        tft_display_set_day_mode(is_day);
+    }
 
     _lock_acquire(&s_lvgl_api_lock);
 

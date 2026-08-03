@@ -43,7 +43,8 @@ typedef struct
  * Start at unity gain to avoid clipping. Increase AUDIO_GAIN_Q8 only after
  * confirming that the WAV file plays cleanly.
  */
-volatile int16_t AUDIO_GAIN_Q8 = AUDIO_GAIN_Q8_UNITY;
+volatile int16_t AUDIO_GAIN_Q8 = AUDIO_GAIN_Q8_DEFAULT;
+volatile uint8_t g_audio_volume_percent = 50U;
 volatile uint32_t AUDIO_PLAYBACK_RATE_HZ = 16000U;
 
 static dac_oneshot_handle_t s_dac_handle = NULL;
@@ -439,6 +440,9 @@ esp_err_t audio_amp_enable(int enable)
 
 void audio_set_gain_q8(int32_t gain_q8)
 {
+    int32_t gain_range;
+    int32_t volume_percent;
+
     if (gain_q8 < AUDIO_GAIN_Q8_MIN)
     {
         gain_q8 = AUDIO_GAIN_Q8_MIN;
@@ -450,11 +454,57 @@ void audio_set_gain_q8(int32_t gain_q8)
     }
 
     AUDIO_GAIN_Q8 = (int16_t)gain_q8;
+
+    gain_range = AUDIO_GAIN_Q8_MAX - AUDIO_GAIN_Q8_MIN;
+
+    if (gain_range <= 0)
+    {
+        g_audio_volume_percent = 0U;
+        return;
+    }
+
+    volume_percent =
+        ((gain_q8 - AUDIO_GAIN_Q8_MIN) * 100 + gain_range / 2) /
+        gain_range;
+
+    if (volume_percent < 0)
+    {
+        volume_percent = 0;
+    }
+    else if (volume_percent > 100)
+    {
+        volume_percent = 100;
+    }
+
+    g_audio_volume_percent = (uint8_t)volume_percent;
 }
 
 int32_t audio_get_gain_q8(void)
 {
     return AUDIO_GAIN_Q8;
+}
+
+void audio_set_volume_percent(uint8_t volume_percent)
+{
+    int32_t gain_range;
+    int32_t gain_q8;
+
+    if (volume_percent > 100U)
+    {
+        volume_percent = 100U;
+    }
+
+    gain_range = AUDIO_GAIN_Q8_MAX - AUDIO_GAIN_Q8_MIN;
+    gain_q8 = AUDIO_GAIN_Q8_MIN +
+              ((gain_range * (int32_t)volume_percent + 50) / 100);
+
+    g_audio_volume_percent = volume_percent;
+    AUDIO_GAIN_Q8 = (int16_t)gain_q8;
+}
+
+uint8_t audio_get_volume_percent(void)
+{
+    return g_audio_volume_percent;
 }
 
 void audio_set_playback_rate_hz(uint32_t playback_rate_hz)
@@ -539,7 +589,7 @@ esp_err_t audio_play_wav_file(const char *path)
     char full_path[256];
     FILE *file = NULL;
     wav_info_t wav;
-    esp_err_t result;
+    esp_err_t result = ESP_OK;
 
     uint32_t bytes_per_sample;
     uint32_t frame_size;
