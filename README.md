@@ -2,6 +2,7 @@
 TimeWise is an ESP32-based smart table clock built using the **Cheap Yellow Display (CYD)**.
 The project originally started as a simple clock and weather display using the Arduino IDE. Over time, it has evolved into an ESP-IDF-based embedded system with weather visualization, alarms, WebSocket-based remote control, and Navidrome music streaming.
 The project has been developed incrementally, with each version representing a major functional milestone.
+
 ---
 # Version History
 ## V1 — Time and Weather
@@ -33,6 +34,7 @@ The weather data was parsed by the ESP32 and displayed along with the current ti
 - WeatherAPI integration
 - Current time display
 - Current weather display
+  
 ---
 # V1.1 — Alarm Clock
 V1.1 expanded the original clock by adding an **alarm system with audio playback**.
@@ -74,6 +76,7 @@ Everything from V1 plus:
 V1.1 is the final version developed using the **Arduino IDE**.
 At this point, I wanted a significantly more advanced graphical interface with images, animations, better task management, networking, and more control over the ESP32 hardware.
 Development therefore moved to **ESP-IDF**.
+
 ---
 # V2 — ESP-IDF Rewrite
 V2 is a major rewrite of TimeWise using **ESP-IDF**.
@@ -97,6 +100,7 @@ Moving from Arduino to ESP-IDF provided significantly more control over:
 - Display drivers
 - System scheduling
 It also made it easier to progressively expand TimeWise into a more complete embedded system.
+
 ---
 ## LVGL
 V2 uses **LVGL** for the graphical interface.
@@ -109,10 +113,12 @@ Using LVGL allowed the interface to support:
 - Sun/Moon graphics
 - More flexible positioning
 - Future animations
+  
 ---
-## Flash Partition
+## Flash Partition 
 V2 uses significantly more application code and graphical resources than the original Arduino version.
 Because of this, the ESP32 flash memory partition layout was modified to provide additional application space.
+
 ---
 ## Weather
 V2 replaces WeatherAPI with: https://open-meteo.com/
@@ -127,6 +133,7 @@ The ESP32 currently retrieves information such as:
 - Sunrise
 - Sunset
 Weather information is retrieved periodically and used to update the TimeWise interface.
+
 ---
 ## Dynamic Weather Backgrounds
 The V2 interface uses full-screen backgrounds that change depending on the current weather.
@@ -167,6 +174,7 @@ SD Card
     └── ...
 ```
 The icon displayed depends on the weather code received from Open-Meteo.
+
 ---
 ## Sun and Moon Indicator
 V2 also includes a graphical **Sun and Moon indicator**.
@@ -208,6 +216,7 @@ The new implementation also makes it easier to integrate alarm control with the 
 - ESP32 internal DAC
 - FreeRTOS-based scheduling
 - Modified flash partition
+  
 ---
 # V2.1 — WebSocket Control
 V2.1 adds a **web-based remote control interface**.
@@ -235,6 +244,7 @@ SD Card
     └── DRAW.png
 ```
 The ESP32 serves the page through its HTTP server while WebSockets provide real-time communication with the firmware.
+
 ---
 ## WebSocket Controls
 The WebSocket interface currently supports controls such as:
@@ -272,11 +282,13 @@ Everything from V2 plus:
 - Volume control
 - Brightness control
 - Real-time device state
+  
 ---
 # V2.2 — Navidrome Music Player
 V2.2 adds a network music player to TimeWise.
 Music is streamed from a **Navidrome server**. https://www.navidrome.org/
 Navidrome provides a Subsonic-compatible API that allows the ESP32 to request songs and stream audio directly from the music server.
+
 ---
 ## Music Selection
 TimeWise can request a random song from Navidrome.
@@ -287,6 +299,7 @@ Navidrome returns information including:
 - Album
 - Duration
 This information is then used by the MusicPlayer.
+
 ---
 ## MP3 Streaming
 Songs are streamed directly over HTTP.
@@ -302,6 +315,7 @@ HTTP MP3 Stream
 ESP32
 ```
 The MP3 stream is processed continuously as the song plays.
+
 ---
 ## MP3 Decoding
 The streamed MP3 data is decoded using the **Espressif audio codec library**.
@@ -313,6 +327,7 @@ Stereo
 ```
 depending on the source audio.
 The stereo samples are converted to mono before being sent to the ESP32 DAC.
+
 ---
 ## Music Audio Pipeline
 The current audio pipeline is:
@@ -350,6 +365,7 @@ CYD Amplifier
 Speaker
 ```
 The same audio filtering and gain processing used by the alarm system is also reused by the music player.
+
 ---
 # Dedicated Music Mode
 One of the biggest challenges with V2.2 was **ESP32 RAM usage**.
@@ -366,6 +382,7 @@ MP3 Decoder
 ```
 Running all of them simultaneously caused memory allocation problems.
 To solve this, TimeWise now uses two different operating modes.
+
 ---
 ## Normal TimeWise Mode
 When:
@@ -387,6 +404,7 @@ TIMEWISE MODE
 └── Full WebSocket Server
 ```
 The MusicPlayer is completely disabled in this mode.
+
 ---
 ## Music Mode
 When:
@@ -412,6 +430,7 @@ This includes:
 - Astronomy updates
 - Normal alarm scheduling
 - Normal LVGL processing
+  
 ---
 ## LVGL Memory Management
 The LVGL task uses a significant amount of RAM.
@@ -442,6 +461,7 @@ Start DAC
 ```
 The image already written to the TFT remains visible because the LCD retains the framebuffer information that was sent to it.
 This allows the LVGL task memory to be reused by the MP3 decoder.
+
 ---
 ## Returning to TimeWise
 When:
@@ -486,8 +506,8 @@ Current controls include:
 - Previous
 - Stop
 - Music Volume
-
 The webpage also receives information about the currently playing track.
+
 ---
 ## Now Playing
 The TimeWise display shows information about the current song including:
@@ -528,6 +548,7 @@ Start MusicPlayer
 Next Song
 ```
 The device can therefore continue playing random music without user interaction.
+
 ---
 # Current Architecture
 The current TimeWise architecture looks approximately like this:
@@ -624,7 +645,7 @@ WebSocket Remote Control
 V2.2
 Navidrome Music Player
 ```
---
+---
 # Current Status
 **V2.2 is currently undergoing endurance testing.**
 The main areas being tested are:
@@ -641,6 +662,7 @@ The main areas being tested are:
 - LVGL task destruction/recreation
 - Long-term TimeWise operation
 The goal is to verify that the system remains stable over extended periods before adding additional functionality.
+
 ---
 # Future Development
 Possible future improvements include:
@@ -657,6 +679,7 @@ Possible future improvements include:
 - Further memory optimization
 - Remote access outside the local network
 - Long-term reliability improvements
+  
 ---
 # Project Evolution
 What started as:
