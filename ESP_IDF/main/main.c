@@ -55,8 +55,8 @@ static const char *TAG = "TimeWise";
 /* -------------------------------------------------------------------------- */
 
 /* Restore your existing private Wi-Fi values locally. */
-#define WIFI_SSID                       "TP-195_2"
-#define WIFI_PASS                       "Porsche@911_GT"
+#define WIFI_SSID                       "WIFI-SSID"
+#define WIFI_PASS                       "WIFI-PASSWORD"
 
 #define WEATHER_LATITUDE                40.7282
 #define WEATHER_LONGITUDE              -74.0776
