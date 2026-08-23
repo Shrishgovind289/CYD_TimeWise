@@ -21,7 +21,9 @@ The ESP32 connects to Wi-Fi and periodically synchronizes its system time throug
 ### Weather
 Weather information was retrieved using: https://www.weatherapi.com/
 The weather data was parsed by the ESP32 and displayed along with the current time.
+
 ![V1](https://github.com/user-attachments/assets/b389e814-ec45-466e-8340-74e36d75b2b3)
+
 ### V1 Features
 - ESP32 Cheap Yellow Display
 - Arduino IDE
@@ -178,6 +180,7 @@ Moonrise = Sunset + 35 minutes | Moonset = Sunrise - 35 minutes
 ```
 This is not intended to be astronomically accurate.
 It is primarily used as a visual approximation for the interface.
+
 <img width="599" height="900" alt="WhatsApp Image 2026-08-02 at 10 39 49 PM" src="https://github.com/user-attachments/assets/de70f391-3b28-42cf-a8ad-3d18bfd01db8" />
 
 ---
