@@ -63,6 +63,9 @@ void audio_set_bandpass_alpha_q15(int32_t hp_alpha_q15, int32_t lp_alpha_q15);
 void audio_get_bandpass_alpha_q15(int32_t *hp_alpha_q15, int32_t *lp_alpha_q15);
 void audio_reset_filter(void);
 
+/* Shared processing chain: band-pass -> Q8 gain -> signed 16-bit clamp. */
+int32_t audio_process_sample_s16(int32_t sample);
+
 esp_err_t audio_play_wav_file(const char *path);
 void audio_stop(void);
 int audio_is_playing(void);

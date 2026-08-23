@@ -9,6 +9,8 @@ idf_component_register(
         "sun.c"
         "moon.c"
         "WebSocketControl.c"
+        "NavidromeClient.c"
+        "MusicPlayer.c"
        
        
     INCLUDE_DIRS "."

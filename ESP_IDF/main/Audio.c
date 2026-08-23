@@ -574,6 +574,14 @@ void audio_reset_filter(void)
     memset(&s_filter, 0, sizeof(s_filter));
 }
 
+int32_t audio_process_sample_s16(int32_t sample)
+{
+    sample = apply_bandpass_s16(sample);
+    sample = apply_gain_s16(sample);
+
+    return sample;
+}
+
 void audio_stop(void)
 {
     s_stop_requested = 1;
@@ -586,7 +594,6 @@ int audio_is_playing(void)
 
 esp_err_t audio_play_wav_file(const char *path)
 {
-    char full_path[256];
     FILE *file = NULL;
     wav_info_t wav;
     esp_err_t result = ESP_OK;
@@ -628,18 +635,11 @@ esp_err_t audio_play_wav_file(const char *path)
         return ESP_ERR_INVALID_STATE;
     }
 
-    result = sdcard_make_path(path, full_path, sizeof(full_path));
-
-    if (result != ESP_OK)
-    {
-        return result;
-    }
-
-    file = fopen(full_path, "rb");
+    file = fopen(path, "rb");
 
     if (file == NULL)
     {
-        ESP_LOGE(TAG, "Failed to open WAV file: %s", full_path);
+        ESP_LOGE(TAG, "Failed to open WAV file: %s", path);
         return ESP_ERR_NOT_FOUND;
     }
 
@@ -690,7 +690,7 @@ esp_err_t audio_play_wav_file(const char *path)
         return ESP_ERR_INVALID_ARG;
     }
 
-    ESP_LOGI(TAG, "Playing: %s", full_path);
+    ESP_LOGI(TAG, "Playing: %s", path);
     ESP_LOGI(TAG,
              "Header rate=%lu Hz, playback rate=%lu Hz, Gain_Q8=%ld, BPF=%s",
              (unsigned long)wav.sample_rate,
@@ -758,8 +758,7 @@ esp_err_t audio_play_wav_file(const char *path)
                                                      wav.num_channels,
                                                      wav.bits_per_sample);
 
-            sample = apply_bandpass_s16(sample);
-            sample = apply_gain_s16(sample);
+            sample = audio_process_sample_s16(sample);
 
             uint8_t dac_value = sample_s16_to_dac_u8(sample);
             dac_oneshot_output_voltage(s_dac_handle, dac_value);

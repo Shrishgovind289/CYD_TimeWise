@@ -88,6 +88,8 @@ LV_IMAGE_DECLARE(moon);
 #define TFT_LVGL_TASK_MIN_DELAY_MS       (1000U / CONFIG_FREERTOS_HZ)
 #define TFT_LVGL_TASK_STACK_SIZE         (16U * 1024U)
 #define TFT_LVGL_TASK_PRIORITY           2
+#define TFT_LVGL_STOP_WAIT_MS            1000U
+#define TFT_LVGL_STOP_POLL_MS            10U
 
 /* -------------------------------------------------------------------------- */
 /*                          Raw image configuration                           */
@@ -154,6 +156,7 @@ static lv_display_t *s_display = NULL;
 static esp_lcd_panel_handle_t s_panel_handle = NULL;
 static esp_lcd_panel_io_handle_t s_io_handle = NULL;
 static esp_timer_handle_t s_lvgl_tick_timer = NULL;
+static TaskHandle_t s_lvgl_task_handle = NULL;
 
 static lv_image_decoder_t *s_background_decoder = NULL;
 
@@ -177,6 +180,13 @@ static lv_point_precise_t s_astro_arc_points[TFT_ASTRO_ARC_POINT_COUNT] = {0};
 static lv_obj_t *s_sun_image = NULL;
 static lv_obj_t *s_moon_image = NULL;
 
+/* Full-screen static Now Playing overlay. */
+static lv_obj_t *s_music_overlay = NULL;
+static lv_obj_t *s_music_status_label = NULL;
+static lv_obj_t *s_music_title_label = NULL;
+static lv_obj_t *s_music_artist_label = NULL;
+static lv_obj_t *s_music_duration_label = NULL;
+
 static bool s_sun_interval_valid = false;
 static int64_t s_sunrise_minutes = 0;
 static int64_t s_sunset_minutes = 0;
@@ -188,6 +198,7 @@ static int64_t s_last_astro_minute = -1;
 
 volatile uint8_t g_display_brightness_percent = 100U;
 volatile bool g_display_is_day = true;
+volatile bool g_tft_display_paused = false;
 
 static bool s_backlight_initialized = false;
 static portMUX_TYPE s_backlight_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -681,12 +692,23 @@ static esp_err_t tft_register_background_decoder(void)
 
 static bool tft_icon_make_stdio_path(const char *lvgl_path, char *stdio_path, size_t stdio_path_size)
 {
-    if (!tft_icon_path_supported(lvgl_path) || stdio_path == NULL || stdio_path_size == 0U)
+    if (!tft_icon_path_supported(lvgl_path) ||
+        stdio_path == NULL ||
+        stdio_path_size == 0U)
     {
         return false;
     }
 
-    return sdcard_make_path(lvgl_path + 2, stdio_path, stdio_path_size) == ESP_OK;
+    int written = snprintf(
+        stdio_path,
+        stdio_path_size,
+        "%s%s",
+        SDCARD_MOUNT_POINT,
+        lvgl_path + 2
+    );
+
+    return written > 0 &&
+           (size_t)written < stdio_path_size;
 }
 
 static bool tft_icon_load_transparent(const char *lvgl_path, uint32_t render_limit, uint8_t **pixel_data_out, uint32_t *data_size_out, uint32_t *width_out, uint32_t *height_out)
@@ -927,19 +949,64 @@ static void tft_display_lvgl_task(void *argument)
 
     ESP_LOGI(TAG, "LVGL task started");
 
-    while (true)
+    while (!g_tft_display_paused)
     {
-        _lock_acquire(&s_lvgl_api_lock);
+        _lock_acquire(
+            &s_lvgl_api_lock
+        );
 
-        uint32_t delay_ms = lv_timer_handler();
+        uint32_t delay_ms =
+            lv_timer_handler();
 
-        _lock_release(&s_lvgl_api_lock);
+        _lock_release(
+            &s_lvgl_api_lock
+        );
 
-        delay_ms = MAX(delay_ms, TFT_LVGL_TASK_MIN_DELAY_MS);
-        delay_ms = MIN(delay_ms, TFT_LVGL_TASK_MAX_DELAY_MS);
+        /*
+         * A pause request can arrive while lv_timer_handler() is active.
+         * Check again only after releasing the LVGL lock so this task can
+         * safely delete itself without leaving the lock permanently held.
+         */
+        if (g_tft_display_paused)
+        {
+            break;
+        }
 
-        usleep(delay_ms * 1000U);
+        delay_ms =
+            MAX(
+                delay_ms,
+                TFT_LVGL_TASK_MIN_DELAY_MS
+            );
+
+        delay_ms =
+            MIN(
+                delay_ms,
+                TFT_LVGL_TASK_MAX_DELAY_MS
+            );
+
+        vTaskDelay(
+            pdMS_TO_TICKS(
+                delay_ms
+            )
+        );
     }
+
+    /*
+     * Music Mode intentionally deletes this task rather than merely sleeping
+     * it. The 16 KB LVGL stack is therefore returned to the heap before the
+     * MP3 decoder performs its large lazy allocation.
+     */
+    s_lvgl_task_handle =
+        NULL;
+
+    ESP_LOGI(
+        TAG,
+        "LVGL task stopped and stack released"
+    );
+
+    vTaskDelete(
+        NULL
+    );
 }
 
 static void tft_display_tick_callback(void *argument)
@@ -948,6 +1015,40 @@ static void tft_display_tick_callback(void *argument)
 
     lv_tick_inc(TFT_LVGL_TICK_PERIOD_MS);
 }
+
+static esp_err_t tft_display_start_lvgl_task(void)
+{
+    if (s_lvgl_task_handle != NULL)
+    {
+        return ESP_OK;
+    }
+
+    BaseType_t task_result =
+        xTaskCreate(
+            tft_display_lvgl_task,
+            "LVGL",
+            TFT_LVGL_TASK_STACK_SIZE,
+            NULL,
+            TFT_LVGL_TASK_PRIORITY,
+            &s_lvgl_task_handle
+        );
+
+    if (task_result != pdPASS)
+    {
+        s_lvgl_task_handle =
+            NULL;
+
+        ESP_LOGE(
+            TAG,
+            "Could not create LVGL task"
+        );
+
+        return ESP_ERR_NO_MEM;
+    }
+
+    return ESP_OK;
+}
+
 
 /* -------------------------------------------------------------------------- */
 /*                           Dashboard helpers                                */
@@ -1473,11 +1574,12 @@ esp_err_t tft_display_init(void)
 
     ESP_ERROR_CHECK(esp_lcd_panel_io_register_event_callbacks(s_io_handle, &panel_callbacks, s_display));
 
-    BaseType_t task_result = xTaskCreate(tft_display_lvgl_task, "LVGL", TFT_LVGL_TASK_STACK_SIZE, NULL, TFT_LVGL_TASK_PRIORITY, NULL);
+    esp_err_t lvgl_task_result =
+        tft_display_start_lvgl_task();
 
-    if (task_result != pdPASS)
+    if (lvgl_task_result != ESP_OK)
     {
-        return ESP_ERR_NO_MEM;
+        return lvgl_task_result;
     }
 
     ESP_ERROR_CHECK(tft_display_apply_brightness());
@@ -1487,6 +1589,138 @@ esp_err_t tft_display_init(void)
              (unsigned int)tft_display_get_effective_brightness_percent());
 
     return ESP_OK;
+}
+
+void tft_display_set_paused(bool paused)
+{
+    if (paused)
+    {
+        if (g_tft_display_paused &&
+            s_lvgl_task_handle == NULL)
+        {
+            return;
+        }
+
+        /*
+         * Signal the LVGL task first. It will finish any active
+         * lv_timer_handler(), release the LVGL API lock, and delete itself.
+         */
+        g_tft_display_paused =
+            true;
+
+        if (s_lvgl_tick_timer != NULL)
+        {
+            esp_err_t timer_result =
+                esp_timer_stop(
+                    s_lvgl_tick_timer
+                );
+
+            if (timer_result != ESP_OK &&
+                timer_result != ESP_ERR_INVALID_STATE)
+            {
+                ESP_LOGW(
+                    TAG,
+                    "Could not stop LVGL tick timer: %s",
+                    esp_err_to_name(timer_result)
+                );
+            }
+        }
+
+        /*
+         * Wait for self-deletion instead of force-deleting the task. This
+         * guarantees that the LVGL API lock is never abandoned while locked.
+         */
+        uint32_t waited_ms = 0U;
+
+        while (s_lvgl_task_handle != NULL &&
+               waited_ms < TFT_LVGL_STOP_WAIT_MS)
+        {
+            vTaskDelay(
+                pdMS_TO_TICKS(
+                    TFT_LVGL_STOP_POLL_MS
+                )
+            );
+
+            waited_ms +=
+                TFT_LVGL_STOP_POLL_MS;
+        }
+
+        if (s_lvgl_task_handle != NULL)
+        {
+            ESP_LOGW(
+                TAG,
+                "LVGL task did not stop within %u ms",
+                (unsigned int)TFT_LVGL_STOP_WAIT_MS
+            );
+        }
+        else
+        {
+            ESP_LOGI(
+                TAG,
+                "Display processing paused; LVGL task memory released"
+            );
+        }
+
+        return;
+    }
+
+    if (!g_tft_display_paused &&
+        s_lvgl_task_handle != NULL)
+    {
+        return;
+    }
+
+    /*
+     * Allow the recreated task to run, then restart the LVGL tick source.
+     */
+    g_tft_display_paused =
+        false;
+
+    esp_err_t task_result =
+        tft_display_start_lvgl_task();
+
+    if (task_result != ESP_OK)
+    {
+        g_tft_display_paused =
+            true;
+
+        ESP_LOGE(
+            TAG,
+            "Could not resume display: %s",
+            esp_err_to_name(task_result)
+        );
+
+        return;
+    }
+
+    if (s_lvgl_tick_timer != NULL)
+    {
+        esp_err_t timer_result =
+            esp_timer_start_periodic(
+                s_lvgl_tick_timer,
+                TFT_LVGL_TICK_PERIOD_MS * 1000U
+            );
+
+        if (timer_result != ESP_OK &&
+            timer_result != ESP_ERR_INVALID_STATE)
+        {
+            ESP_LOGW(
+                TAG,
+                "Could not restart LVGL tick timer: %s",
+                esp_err_to_name(timer_result)
+            );
+        }
+    }
+
+    ESP_LOGI(
+        TAG,
+        "Display processing resumed; LVGL task recreated"
+    );
+}
+
+bool tft_display_is_paused(void)
+{
+    return g_tft_display_paused;
 }
 
 esp_err_t tft_dashboard_create(void)
@@ -1612,6 +1846,50 @@ esp_err_t tft_dashboard_create(void)
     lv_obj_clear_flag(s_wind_arrow, LV_OBJ_FLAG_SCROLLABLE);
 
     tft_dashboard_update_wind_arrow_locked(0);
+
+    /* ---------------------------------------------------------------------- */
+    /* Now Playing overlay                                                    */
+    /* ---------------------------------------------------------------------- */
+
+    s_music_overlay = lv_obj_create(screen);
+    lv_obj_remove_style_all(s_music_overlay);
+    lv_obj_set_size(s_music_overlay, TFT_LCD_H_RES, TFT_LCD_V_RES);
+    lv_obj_set_pos(s_music_overlay, 0, 0);
+    lv_obj_set_style_bg_color(s_music_overlay, lv_color_hex(0x0B1220), 0);
+    lv_obj_set_style_bg_opa(s_music_overlay, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(s_music_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_music_status_label = lv_label_create(s_music_overlay);
+    lv_label_set_text(s_music_status_label, "NOW PLAYING");
+    lv_obj_set_style_text_color(s_music_status_label, lv_color_hex(0x9AA7BA), 0);
+    lv_obj_set_style_text_font(s_music_status_label, &lv_font_montserrat_18, 0);
+    lv_obj_align(s_music_status_label, LV_ALIGN_TOP_MID, 0, 32);
+
+    s_music_title_label = lv_label_create(s_music_overlay);
+    lv_label_set_text(s_music_title_label, "Unknown Song");
+    lv_obj_set_width(s_music_title_label, 420);
+    lv_label_set_long_mode(s_music_title_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(s_music_title_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_music_title_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(s_music_title_label, &lv_font_montserrat_24, 0);
+    lv_obj_align(s_music_title_label, LV_ALIGN_TOP_MID, 0, 82);
+
+    s_music_artist_label = lv_label_create(s_music_overlay);
+    lv_label_set_text(s_music_artist_label, "Unknown Artist");
+    lv_obj_set_width(s_music_artist_label, 420);
+    lv_label_set_long_mode(s_music_artist_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(s_music_artist_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_music_artist_label, lv_color_hex(0xC2CBD8), 0);
+    lv_obj_set_style_text_font(s_music_artist_label, &lv_font_montserrat_18, 0);
+    lv_obj_align(s_music_artist_label, LV_ALIGN_CENTER, 0, 38);
+
+    s_music_duration_label = lv_label_create(s_music_overlay);
+    lv_label_set_text(s_music_duration_label, "Duration 0:00");
+    lv_obj_set_style_text_color(s_music_duration_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(s_music_duration_label, &lv_font_montserrat_18, 0);
+    lv_obj_align(s_music_duration_label, LV_ALIGN_BOTTOM_MID, 0, -42);
+
+    lv_obj_add_flag(s_music_overlay, LV_OBJ_FLAG_HIDDEN);
 
     s_dashboard_created = true;
 
@@ -1963,6 +2241,99 @@ void tft_dashboard_set_weather(float temperature_c, const char *condition, const
     {
         free(new_icon_pixels);
     }
+}
+
+void tft_dashboard_show_music(const char *title, const char *artist, uint32_t duration_seconds)
+{
+    if (!s_dashboard_created ||
+        s_music_overlay == NULL ||
+        s_music_title_label == NULL ||
+        s_music_artist_label == NULL ||
+        s_music_duration_label == NULL)
+    {
+        return;
+    }
+
+    const char *display_title =
+        title != NULL && title[0] != '\0'
+        ? title
+        : "Unknown Song";
+
+    const char *display_artist =
+        artist != NULL && artist[0] != '\0'
+        ? artist
+        : "Unknown Artist";
+
+    char duration_text[32];
+
+    snprintf(
+        duration_text,
+        sizeof(duration_text),
+        "Duration %lu:%02lu",
+        (unsigned long)(duration_seconds / 60U),
+        (unsigned long)(duration_seconds % 60U)
+    );
+
+    _lock_acquire(&s_lvgl_api_lock);
+
+    lv_label_set_text(s_music_title_label, display_title);
+    lv_label_set_text(s_music_artist_label, display_artist);
+    lv_label_set_text(s_music_duration_label, duration_text);
+
+    lv_obj_clear_flag(s_music_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_music_overlay);
+    lv_obj_invalidate(s_music_overlay);
+
+    _lock_release(&s_lvgl_api_lock);
+
+    ESP_LOGI(TAG, "Now Playing: %s - %s (%s)", display_artist, display_title, duration_text);
+}
+
+void tft_dashboard_hide_music(void)
+{
+    if (!s_dashboard_created ||
+        s_music_overlay == NULL)
+    {
+        return;
+    }
+
+    _lock_acquire(
+        &s_lvgl_api_lock
+    );
+
+    lv_obj_add_flag(
+        s_music_overlay,
+        LV_OBJ_FLAG_HIDDEN
+    );
+
+    /*
+     * The Music screen may have been the only frame physically present while
+     * the LVGL task was deleted. Invalidate the complete active screen so the
+     * underlying TimeWise dashboard is repainted immediately after resume.
+     */
+    if (s_display != NULL)
+    {
+        lv_obj_t *screen =
+            lv_display_get_screen_active(
+                s_display
+            );
+
+        if (screen != NULL)
+        {
+            lv_obj_invalidate(
+                screen
+            );
+        }
+    }
+
+    _lock_release(
+        &s_lvgl_api_lock
+    );
+
+    ESP_LOGI(
+        TAG,
+        "Now Playing screen hidden; dashboard redraw requested"
+    );
 }
 
 void tft_dashboard_set_wind(float wind_speed_kmh, int wind_direction_degrees)

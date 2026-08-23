@@ -5,7 +5,6 @@
 
 #include "esp_err.h"
 #include "driver/spi_master.h"
-#include "sdmmc_cmd.h"
 
 /*
  * LCDWIKI ESP32-32E onboard MicroSD pins
@@ -23,8 +22,8 @@
 #define SDCARD_PIN_CS          5
 
 /*
- * LCD uses SPI2_HOST in your TFT_Display code.
- * SD card should use SPI3_HOST to avoid bus conflict.
+ * LCD uses SPI2_HOST in TFT_Display.
+ * SD card uses SPI3_HOST to avoid bus conflict.
  */
 #define SDCARD_SPI_HOST        SPI3_HOST
 
@@ -36,16 +35,18 @@ esp_err_t sdcard_deinit(void);
 
 int sdcard_is_mounted(void);
 
-sdmmc_card_t *sdcard_get_card(void);
-const char *sdcard_get_mount_point(void);
-
-void sdcard_print_info(void);
-
-esp_err_t sdcard_make_path(const char *path, char *out_path, size_t out_size);
+/*
+ * All filesystem paths passed to the SDCard API must already be absolute
+ * VFS paths beginning with SDCARD_MOUNT_POINT, for example:
+ *
+ *     /sdcard/alarm.wav
+ *     /sdcard/WEB/index.htm
+ *
+ * SDCard.c does not prepend, normalize, or rebuild paths.
+ */
 esp_err_t sdcard_check_file(const char *path);
 esp_err_t sdcard_list_dir(const char *path, int max_depth);
 
-esp_err_t sdcard_mkdir(const char *path);
 esp_err_t sdcard_write_text_file(const char *path, const char *text);
 esp_err_t sdcard_read_text_file(const char *path, char *buffer, size_t buffer_size);
 
