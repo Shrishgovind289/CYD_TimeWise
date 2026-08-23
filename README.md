@@ -1,40 +1,28 @@
 # CYD_TimeWise
-
 TimeWise is an ESP32-based smart table clock built using the **Cheap Yellow Display (CYD)**.
 The project originally started as a simple clock and weather display using the Arduino IDE. Over time, it has evolved into an ESP-IDF-based embedded system with weather visualization, alarms, WebSocket-based remote control, and Navidrome music streaming.
 The project has been developed incrementally, with each version representing a major functional milestone.
 ---
 # Version History
-
 ## V1 — Time and Weather
-
 The first version of TimeWise was developed using the **Arduino IDE**.
 The goal of V1 was simple:
 - Display the current time
 - Synchronize time over Wi-Fi
 - Retrieve and display weather information
-
 ### Display
-
 The CYD uses an **ST7796U TFT display**.
 Initially, I attempted to configure `TFT_eSPI`, but after struggling with the configuration I decided to manually develop a basic ST7796U display driver.
 The driver was mainly intended as a temporary/testing solution, but it was enough to get the original TimeWise interface working.
 A simple custom `fonts.h` implementation was also used. It was not perfect, but it got the job done for the first version.
-
 ### Time
-
 Time synchronization was implemented using an **NTP server**.
 The ESP32 connects to Wi-Fi and periodically synchronizes its system time through NTP.
-
 ### Weather
-
 Weather information was retrieved using: https://www.weatherapi.com/
 The weather data was parsed by the ESP32 and displayed along with the current time.
-
 ![V1](https://github.com/user-attachments/assets/b389e814-ec45-466e-8340-74e36d75b2b3)
-
 ### V1 Features
-
 - ESP32 Cheap Yellow Display
 - Arduino IDE
 - Custom ST7796U TFT driver
@@ -43,17 +31,12 @@ The weather data was parsed by the ESP32 and displayed along with the current ti
 - WeatherAPI integration
 - Current time display
 - Current weather display
-
 ---
-
 # V1.1 — Alarm Clock
-
 V1.1 expanded the original clock by adding an **alarm system with audio playback**.
 The alarm audio is stored as a `.wav` file on the SD card.
 The original audio file was edited using **Audacity** and converted into an **8-bit PCM WAV file** to simplify playback on the ESP32.
-
 ### Audio Playback
-
 Initially, the audio quality was terrible and the audio played much too quickly.
 To correct the playback speed, a delay between DAC samples was calculated using the audio sampling rate.
 Conceptually:
@@ -62,9 +45,7 @@ Sample Period = 1 / Sampling Rate
 ```
 The resulting microsecond delay was added between samples while sending the audio data to the ESP32 DAC.
 This allowed the WAV file to play at approximately the correct speed.
-
 ### Audio Filtering
-
 A simple **band-pass filter** and gain adjustment were later added to improve the sound.
 The filter coefficients and gain values were not mathematically optimized. They were adjusted experimentally until the alarm audio became reasonably clear.
 The audio quality is still not perfect due to:
@@ -73,15 +54,11 @@ The audio quality is still not perfect due to:
 - Basic filtering
 - Limited audio hardware
 However, the alarm audio is only around 30 seconds long and plays twice when the alarm is triggered, so the resulting quality is more than sufficient for the application.
-
 ### Audio Hardware
-
 The CYD board contains an integrated audio amplifier.
 The speaker used for TimeWise was salvaged from a damaged **2nd-generation Amazon Echo Dot**.
 The Echo Dot itself was no longer working, so I reused the speaker for the TimeWise project.
-
 ### V1.1 Features
-
 Everything from V1 plus:
 - Alarm clock
 - Alarm enable/disable
@@ -92,14 +69,11 @@ Everything from V1 plus:
 - Band-pass filtering
 - Gain adjustment
 - Salvaged Amazon Echo Dot speaker
-
 V1.1 is the final version developed using the **Arduino IDE**.
 At this point, I wanted a significantly more advanced graphical interface with images, animations, better task management, networking, and more control over the ESP32 hardware.
-
 Development therefore moved to **ESP-IDF**.
 ---
 # V2 — ESP-IDF Rewrite
-
 V2 is a major rewrite of TimeWise using **ESP-IDF**.
 The goal of V2 was not initially to add new major features, but instead to recreate the core functionality of V1.1 using a better embedded architecture.
 The three core functions remain:
@@ -109,9 +83,7 @@ Weather
 Alarm
 ```
 However, the internal implementation was completely redesigned.
-
 ## ESP-IDF
-
 Moving from Arduino to ESP-IDF provided significantly more control over:
 - FreeRTOS tasks
 - Memory
@@ -125,7 +97,6 @@ Moving from Arduino to ESP-IDF provided significantly more control over:
 It also made it easier to progressively expand TimeWise into a more complete embedded system.
 ---
 ## LVGL
-
 V2 uses **LVGL** for the graphical interface.
 This replaced the basic custom graphics implementation used in the Arduino version.
 Using LVGL allowed the interface to support:
@@ -138,12 +109,10 @@ Using LVGL allowed the interface to support:
 - Future animations
 ---
 ## Flash Partition
-
 V2 uses significantly more application code and graphical resources than the original Arduino version.
 Because of this, the ESP32 flash memory partition layout was modified to provide additional application space.
 ---
 ## Weather
-
 V2 replaces WeatherAPI with: https://open-meteo.com/
 Open-Meteo provides weather information in a format that is convenient for embedded parsing.
 The ESP32 currently retrieves information such as:
@@ -158,14 +127,12 @@ The ESP32 currently retrieves information such as:
 Weather information is retrieved periodically and used to update the TimeWise interface.
 ---
 ## Dynamic Weather Backgrounds
-
 The V2 interface uses full-screen backgrounds that change depending on the current weather.
 Instead of storing all of the images inside ESP32 flash, the backgrounds are stored on the **SD card**.
 Images are first resized and edited using Canva.
 They are then converted from PNG into raw **RGB565 `.BIN` files** using: https://longfangsong.github.io/en/image-to-rgb565/
 The resulting files are copied onto the SD card.
 The ESP32 loads the appropriate background depending on the current weather condition.
-
 Example directory:
 ```text
 SD Card
@@ -180,11 +147,8 @@ SD Card
     ├── THUND.BIN
     └── ...
 ```
-
 ---
-
 ## Weather Icons
-
 Weather icons are also stored on the SD card as RGB565 binary files.
 Example:
 ```text
@@ -203,7 +167,6 @@ SD Card
 The icon displayed depends on the weather code received from Open-Meteo.
 ---
 ## Sun and Moon Indicator
-
 V2 also includes a graphical **Sun and Moon indicator**.
 The Sun and Moon graphics are converted into C arrays and compiled directly into the firmware.
 The astronomical body moves along an arc on the display to approximately represent its position throughout the day or night.
@@ -211,21 +174,17 @@ Sunrise and sunset times are provided by Open-Meteo.
 Moon timing was more difficult because astronomical APIs use different reference points that did not visually align with what I wanted for the interface.
 For the current implementation, the Moon timing is approximated as:
 ```text
-Moonrise = Sunset + 35 minutes
-Moonset = Sunrise - 35 minutes
+Moonrise = Sunset + 35 minutes | Moonset = Sunrise - 35 minutes
 ```
 This is not intended to be astronomically accurate.
 It is primarily used as a visual approximation for the interface.
-
 <img width="599" height="900" alt="WhatsApp Image 2026-08-02 at 10 39 49 PM" src="https://github.com/user-attachments/assets/de70f391-3b28-42cf-a8ad-3d18bfd01db8" />
 
 ---
 ## Alarm
-
 The alarm functionality from V1.1 was rewritten for ESP-IDF.
 The alarm audio continues to be stored on the SD card and played through the ESP32 internal DAC and the CYD amplifier.
 The new implementation also makes it easier to integrate alarm control with the rest of the system.
-
 ### V2 Features
 - ESP-IDF
 - LVGL
@@ -248,7 +207,6 @@ The new implementation also makes it easier to integrate alarm control with the 
 - Modified flash partition
 ---
 # V2.1 — WebSocket Control
-
 V2.1 adds a **web-based remote control interface**.
 The ESP32 runs an HTTP/WebSocket server that allows TimeWise to be controlled from another device on the same network.
 For example:
@@ -276,7 +234,6 @@ SD Card
 The ESP32 serves the page through its HTTP server while WebSockets provide real-time communication with the firmware.
 ---
 ## WebSocket Controls
-
 The WebSocket interface currently supports controls such as:
 - Alarm time
 - Alarm enable/disable
@@ -314,13 +271,11 @@ Everything from V2 plus:
 - Real-time device state
 ---
 # V2.2 — Navidrome Music Player
-
 V2.2 adds a network music player to TimeWise.
 Music is streamed from a **Navidrome server**. https://www.navidrome.org/
 Navidrome provides a Subsonic-compatible API that allows the ESP32 to request songs and stream audio directly from the music server.
 ---
 ## Music Selection
-
 TimeWise can request a random song from Navidrome.
 Navidrome returns information including:
 - Song ID
