@@ -40,13 +40,13 @@ static const char *TAG = "Navidrome";
 /* -------------------------------------------------------------------------- */
 
 char g_navidrome_base_url[NAVIDROME_BASE_URL_MAX_LENGTH] =
-    "http://192.168.0.249:4533";
+    "http://NAVIDROME";
 
 char g_navidrome_username[NAVIDROME_USERNAME_MAX_LENGTH] =
-    "TimeWise";
+    "USERNAME";
 
 char g_navidrome_password[NAVIDROME_PASSWORD_MAX_LENGTH] =
-    "TimeWise32";
+    "PASSWORD";
 
 volatile bool g_navidrome_connected = false;
 
