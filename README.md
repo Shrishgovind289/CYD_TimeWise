@@ -711,3 +711,13 @@ has gradually evolved into:
 ```
 
 TimeWise has become an ongoing project for experimenting with **embedded systems, networking, audio processing, graphical interfaces, memory optimization, and ESP32 development**.
+
+## License
+
+The TimeWise source code is licensed under the [MIT License](LICENSE).
+
+Copyright © 2026 Shrishgovind Umesh Revankar.
+
+Third-party software libraries and dependencies used by TimeWise are subject to their respective licenses.
+
+Unless otherwise stated, media assets such as images, icons, fonts, and audio files are not covered by the MIT License.
