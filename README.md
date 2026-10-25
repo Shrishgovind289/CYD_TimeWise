@@ -614,73 +614,6 @@ SD Card
     ├── Logo.png
     └── DRAW.png
 ```
----
-# Version Summary
-| Version | Major Features |
-|---|---|
-| **V1** | Time + Weather |
-| **V1.1** | Time + Weather + Alarm |
-| **V2** | ESP-IDF rewrite of Time + Weather + Alarm |
-| **V2.1** | WebSocket remote control |
-| **V2.2** | Navidrome music streaming |
-The development progression can be summarized as:
-```text
-V1
-Time + Weather
-│
-▼
-V1.1
-Time + Weather + Alarm
-│
-▼
-V2
-ESP-IDF Rewrite
-Time + Weather + Alarm
-│
-▼
-V2.1
-WebSocket Remote Control
-│
-▼
-V2.2
-Navidrome Music Player
-```
----
-# Current Status
-**V2.2 is currently undergoing endurance testing.**
-The main areas being tested are:
-- Long-duration music playback
-- Automatic song changes
-- Repeated Music Mode enable/disable cycles
-- WebSocket reconnects
-- Wi-Fi interruptions
-- Navidrome interruptions
-- MP3 decoder stability
-- DAC stability
-- Heap usage
-- Memory fragmentation
-- LVGL task destruction/recreation
-- Long-term TimeWise operation
-The goal is to verify that the system remains stable over extended periods before adding additional functionality.
-
----
-# Future Development
-Possible future improvements include:
-- Improved Music Mode UI
-- Additional animations
-- Better audio quality
-- Improved audio filtering
-- Additional Navidrome controls
-- Playlist support
-- Song search
-- Improved astronomy calculations
-- Additional weather information
-- More WebSocket controls
-- Further memory optimization
-- Remote access outside the local network
-- Long-term reliability improvements
-  
----
 # Project Evolution
 What started as:
 ```text
@@ -711,6 +644,1044 @@ has gradually evolved into:
 ```
 
 TimeWise has become an ongoing project for experimenting with **embedded systems, networking, audio processing, graphical interfaces, memory optimization, and ESP32 development**.
+
+# V2.3 — Display Improvements and Automatic Brightness
+
+V2.3 focuses primarily on improving the visual behavior of TimeWise.
+
+After using the display for longer periods, several practical problems became noticeable.
+
+These were not major architectural problems, but they affected how usable the clock was throughout the day.
+
+The main improvements in V2.3 were:
+- Automatic night brightness adjustment
+- Dynamic font color
+- Improved background image updates
+- Better coordination between weather data and the display
+
+---
+## Problem — Display Too Bright at Night
+
+The TFT backlight worked well during the day, but the same brightness level was uncomfortable when TimeWise was used at night.
+
+Originally, display brightness was simply controlled using a fixed value or through the web interface.
+
+For example:
+```text
+Day
+│
+▼
+100% Brightness
+
+Night
+│
+▼
+100% Brightness
+```
+
+This made the clock unnecessarily bright in a dark room.
+
+Manually adjusting the brightness every night was also not a good solution because TimeWise is intended to operate continuously without requiring regular user interaction.
+
+---
+## Solution — Automatic Night Brightness
+
+The display brightness system was connected to the existing day/night information.
+
+TimeWise already knows whether it is currently day or night from the weather and astronomy data.
+
+The brightness logic could therefore use:
+```text
+is_day
+Current Hour
+Requested Brightness
+```
+
+to calculate the actual TFT backlight level.
+
+The resulting behavior became:
+```text
+Day
+│
+▼
+Normal User Brightness
+
+Night
+│
+▼
+Reduced Brightness
+```
+
+A stronger brightness limit can also be applied during late-night hours.
+
+For example:
+```text
+Night + Midnight to Early Morning
+               │
+               ▼
+      Very Low Brightness
+```
+
+This allows the display to remain readable without lighting up the room.
+
+The user can still select the normal brightness level, while TimeWise automatically applies the appropriate night-time reduction.
+
+---
+## Problem — Text Visibility Changed With Background Images
+
+The dynamic weather backgrounds introduced another visual problem.
+
+Some backgrounds are very bright while others are very dark.
+
+For example:
+```text
+Sunny Background
+        │
+        ▼
+Very Bright Image
+```
+
+while:
+```text
+Thunder / Night Background
+        │
+        ▼
+Dark Image
+```
+
+Using one fixed text color for every background meant that text could become difficult to read.
+
+White text works well on dark backgrounds but can disappear against bright clouds or sunlight.
+
+Similarly, dark text can become difficult to see on night or storm backgrounds.
+
+---
+## Solution — Dynamic Font Color
+
+V2.3 adds background-dependent font coloring.
+
+Each weather background can be associated with an appropriate text color.
+
+Conceptually:
+```text
+Weather Condition
+       │
+       ▼
+Background Selection
+       │
+       ├── Bright Background
+       │        │
+       │        ▼
+       │    Dark Text
+       │
+       └── Dark Background
+                │
+                ▼
+            Light Text
+```
+
+The same color selection can then be applied to:
+- Time
+- Date
+- Location
+- Temperature
+- Weather condition
+- Forecast information
+
+This allows the display to remain readable even when the full-screen weather image changes significantly.
+
+---
+## Problem — Background Image Updates
+
+The weather background is a full-screen RGB565 image stored on the SD card.
+
+Changing the background is therefore more complicated than changing a normal LVGL label.
+
+The application must:
+```text
+Receive New Weather
+       │
+       ▼
+Determine Background
+       │
+       ▼
+Open RGB565 File
+       │
+       ▼
+Load / Stream Image
+       │
+       ▼
+Update LVGL
+       │
+       ▼
+Redraw UI Elements
+```
+
+During development, background changes could interfere with other display elements.
+
+Updating the background and weather elements independently could result in parts of the interface being updated at different times.
+
+This was particularly noticeable when:
+- Weather changed
+- Day changed to night
+- A different background was loaded
+- Weather icons were refreshed
+
+---
+## Solution — Coordinated Weather Display Update
+
+The display update process was reorganized so that weather information is applied as a coordinated update.
+
+The weather response first prepares:
+```text
+Temperature
+Condition
+Location
+Background
+Weather Icon
+Day / Night State
+Sunrise
+Sunset
+```
+
+The display module then applies the new information together.
+
+The background image is updated first and the visible weather elements are refreshed immediately afterward.
+
+This reduces unnecessary redraws and makes weather transitions more consistent.
+
+---
+# V3 — Server Gateway Architecture
+
+As TimeWise continued to grow, the ESP32 became responsible for an increasing number of tasks.
+
+By V2.2 it was handling:
+```text
+Display
+LVGL
+NTP
+Weather Requests
+Web Server
+WebSocket
+Navidrome API
+MP3 Streaming
+MP3 Decoding
+Alarm Audio
+Music Audio
+SD Card
+```
+
+Individually these features worked well.
+
+The problem appeared when several of them needed to operate at the same time.
+
+---
+## Problem — Too Much Processing on the ESP32
+
+The biggest limitation was memory.
+
+The ESP32 had to maintain:
+- LVGL buffers
+- FreeRTOS task stacks
+- HTTP buffers
+- WebSocket buffers
+- MP3 buffers
+- Decoder state
+- Audio buffers
+- Weather data
+- SD card operations
+
+MP3 decoding was particularly memory intensive.
+
+This resulted in a system where enabling one feature could require disabling another feature.
+
+For example:
+```text
+Music Enable
+      │
+      ▼
+Stop LVGL
+      │
+      ▼
+Release Display Task Memory
+      │
+      ▼
+Start MP3 Decoder
+```
+
+Although this worked, it made the software increasingly complicated.
+
+The ESP32 was effectively acting as both:
+```text
+Embedded Device
++
+Application Server
+```
+
+---
+## Problem — Direct Network Connections
+
+The ESP32 also communicated directly with several services.
+
+For example:
+```text
+Browser ────────► ESP32
+
+ESP32 ──────────► Weather API
+
+ESP32 ──────────► Navidrome
+```
+
+Each connection required additional:
+- Networking code
+- Buffers
+- Authentication
+- Error handling
+- Reconnection logic
+- Memory
+
+The music player was particularly sensitive to interruptions because the ESP32 needed to maintain the Navidrome connection while simultaneously decoding and playing the MP3 stream.
+
+---
+## Solution — Introduce a Server
+
+V3 introduces a Linux server between the ESP32 and external services.
+
+Instead of treating the ESP32 as the central server, TimeWise was changed into a more traditional **server/client architecture**.
+
+```text
+External Services
+       │
+       ▼
+TimeWise Server
+       │
+       ▼
+ESP32 Client
+```
+
+The server handles tasks that are easier to perform on a Linux computer.
+
+The ESP32 focuses mainly on embedded-device responsibilities.
+
+---
+## Server Responsibilities
+
+The server handles:
+```text
+Web Interface
+HTTP API
+Weather Requests
+Weather Cache
+Navidrome Communication
+Music Selection
+Audio Conversion
+Device Commands
+Device State
+```
+
+The ESP32 handles:
+```text
+Display
+NTP
+Alarm
+Weather Rendering
+Forecast Rendering
+Sun / Moon Display
+Audio Output
+DAC
+Buttons / LEDs
+HTTP Client
+```
+
+The new design therefore becomes:
+```text
+Browser
+   │
+   ▼
+Linux Server
+   │
+   ▼
+ESP32 Client
+```
+
+---
+## Problem — Music Reliability
+
+One of the main reasons for introducing the server was the music player.
+
+In V2.2 the connection was:
+```text
+Navidrome
+    │
+    ▼
+ESP32
+    │
+    ▼
+MP3 Decoder
+    │
+    ▼
+DAC
+```
+
+This required the ESP32 to:
+1. Connect to Navidrome
+2. Authenticate
+3. Request a song
+4. Maintain the HTTP stream
+5. Buffer MP3 data
+6. Decode MP3
+7. Convert stereo audio
+8. Filter the samples
+9. Send audio to the DAC
+
+A network interruption or memory problem anywhere in the chain could interrupt playback.
+
+---
+## Solution — Server to Client Music Architecture
+
+V3 changes the ESP32 from the music-processing server into a much simpler audio client.
+
+The new architecture becomes:
+```text
+Navidrome
+    │
+    ▼
+Linux Server
+    │
+    ▼
+ESP32 Client
+```
+
+The Linux server has significantly more:
+- RAM
+- CPU performance
+- Networking capability
+- Process isolation
+
+than the ESP32.
+
+This makes it a much better place to handle the connection to Navidrome.
+
+The ESP32 only needs to maintain a connection to one service:
+```text
+TimeWise Gateway
+```
+
+This greatly simplifies the embedded networking architecture and provides a more reliable base for the music player.
+
+---
+# V3.1 — Server Weather and Five-Hour Forecast
+
+After moving to the server/client architecture, weather was one of the next systems to be transferred to the gateway.
+
+Previously:
+```text
+ESP32
+   │
+   ▼
+Open-Meteo
+```
+
+V3.1 changes this to:
+```text
+Open-Meteo
+    │
+    ▼
+TimeWise Server
+    │
+    ▼
+ESP32
+```
+
+---
+## Problem — Weather Requests on ESP32
+
+Weather requests require:
+- HTTP connections
+- Response buffers
+- JSON parsing
+- Error handling
+- API URL generation
+
+The ESP32 already had several other network operations running.
+
+Weather requests therefore added another Internet connection that the ESP32 needed to maintain.
+
+There were also cases where the HTTP request itself succeeded but the complete weather update did not.
+
+For example:
+```text
+HTTP Status = 200
+      │
+      ▼
+Response Received
+      │
+      ▼
+Parsing / Display Update Fails
+```
+
+This made debugging difficult because:
+```text
+Successful HTTP Request
+```
+
+did not necessarily mean:
+```text
+Successful Weather Update
+```
+
+---
+## Solution — Server-Side Weather Request
+
+The Open-Meteo connection was moved to the Linux server.
+
+The server now performs the Internet request and stores the weather data.
+
+The ESP32 only requests weather from the local gateway.
+
+```text
+Open-Meteo
+     │
+     ▼
+Linux Gateway
+     │
+     ▼
+Weather Cache
+     │
+     ▼
+ESP32
+```
+
+This separates the system into two responsibilities.
+
+The server handles:
+```text
+Internet Request
+API Formatting
+Weather Cache
+```
+
+The ESP32 handles:
+```text
+Weather Display
+Weather Icons
+Background Selection
+Sun / Moon
+```
+
+---
+## Problem — Five-Hour Forecast
+
+Adding the forecast introduced another problem.
+
+The original weather request was primarily designed around current weather.
+
+A forecast contains several entries:
+```text
+Current
++1 Hour
++2 Hours
++3 Hours
++4 Hours
++5 Hours
+...
+```
+
+Only the next five useful future entries are required by the display.
+
+Trying to treat current weather and forecast information as one single display update made the weather code increasingly complicated.
+
+It also meant that a forecast update could unnecessarily interfere with:
+- Current temperature
+- Current background
+- Current weather icon
+- Sun/Moon data
+
+---
+## Solution — Separate Current Weather and Forecast
+
+V3.1 separates the two operations.
+
+Current weather uses:
+```text
+/weather
+```
+
+Forecast data uses:
+```text
+/forecast
+```
+
+This creates two independent data paths:
+```text
+                 Gateway
+                    │
+          ┌─────────┴─────────┐
+          │                   │
+          ▼                   ▼
+       /weather           /forecast
+          │                   │
+          ▼                   ▼
+Current Weather        Five-Hour Forecast
+```
+
+The current-weather update controls:
+- Temperature
+- Weather condition
+- Main weather icon
+- Background
+- Day/night state
+- Sunrise
+- Sunset
+- Sun/Moon information
+
+The forecast update controls only:
+- Forecast time
+- Forecast temperature
+- Forecast weather code
+- Forecast icon
+
+This prevents the five-hour forecast from unnecessarily redrawing the entire dashboard.
+
+---
+## Problem — Selecting the Correct Five Hours
+
+The Open-Meteo hourly response can contain many hours of data.
+
+The ESP32 should not simply take the first five entries because some entries may correspond to:
+- Earlier hours
+- The current hour
+- Previous cached data
+
+The display should show the next **five future hours**.
+
+---
+## Solution — Forecast Time Filtering
+
+The forecast data is compared against the current NTP time.
+
+The logic becomes:
+```text
+Receive Forecast
+       │
+       ▼
+Read Current NTP Time
+       │
+       ▼
+Ignore Past Hours
+       │
+       ▼
+Ignore Current Hour
+       │
+       ▼
+Select Next Five Hours
+       │
+       ▼
+Display Forecast
+```
+
+Each selected entry provides:
+```text
+Time
+Temperature
+Weather Code
+Day / Night
+```
+
+The ESP32 then determines which weather icon should be displayed.
+
+---
+## Problem — Forecast Updating During Other Display Operations
+
+The display can also be busy with:
+- Background updates
+- Music Mode
+- Alarm playback
+- LVGL activity
+- Current weather updates
+
+Immediately drawing the forecast from the HTTP task could cause several parts of the interface to update simultaneously.
+
+---
+## Solution — Pending Forecast Data
+
+The received forecast is first stored as pending data.
+
+```text
+HTTP Forecast Response
+        │
+        ▼
+Pending Forecast Buffer
+        │
+        ▼
+Main Application
+        │
+        ▼
+LVGL Display Update
+```
+
+The main application applies the forecast when it is safe to modify the display.
+
+This keeps network operations separate from display operations and avoids unnecessary competition between tasks.
+
+---
+# V3.2 — Navidrome API and Server Audio Streaming
+
+V3.2 focuses on redesigning the music system around the new server architecture.
+
+The biggest change is that the ESP32 is no longer responsible for MP3 decoding.
+
+---
+## Problem — Direct Navidrome API on ESP32
+
+In V2.2, the ESP32 communicated directly with the Navidrome Subsonic API.
+
+The ESP32 was responsible for:
+```text
+Authentication
+Song Selection
+Song Metadata
+Stream URL
+MP3 Download
+MP3 Decode
+Audio Playback
+```
+
+This added a significant amount of networking and application logic to the embedded firmware.
+
+It also meant that Navidrome credentials and API behavior needed to be handled by the ESP32.
+
+---
+## Solution — Navidrome Client on the Server
+
+V3.2 moves the Navidrome API implementation to the TimeWise server.
+
+```text
+ESP32
+   │
+   │ Music Command
+   ▼
+TimeWise Server
+   │
+   │ Subsonic API
+   ▼
+Navidrome
+```
+
+The server stores the Navidrome configuration using environment variables instead of storing credentials inside the ESP32 firmware.
+
+The server performs:
+- Authentication
+- Song selection
+- Metadata requests
+- Stream requests
+
+The ESP32 only needs to understand the TimeWise gateway API.
+
+---
+## Problem — MP3 Decoding on ESP32
+
+MP3 decoding was one of the most memory-intensive operations in TimeWise.
+
+The decoder required:
+- Compressed audio buffer
+- Decoder state
+- PCM output buffer
+- FreeRTOS task stack
+
+At the same time, the ESP32 also needed memory for LVGL and the rest of TimeWise.
+
+This caused the original Music Mode to require several services to be stopped just to free enough memory for the MP3 decoder.
+
+---
+## Solution — Decode MP3 on the Server
+
+The MP3 decoder was removed from the ESP32.
+
+The Linux server now performs the decoding using **FFmpeg**.
+
+```text
+Navidrome
+    │
+    ▼
+MP3 Stream
+    │
+    ▼
+FFmpeg
+    │
+    ▼
+PCM
+```
+
+The server converts the source audio into a format that the ESP32 can send almost directly to its DAC.
+
+The output format is:
+```text
+24000 Hz
+Mono
+Unsigned 8-bit PCM
+```
+
+---
+## Why 24 kHz Mono 8-bit PCM?
+
+The ESP32 uses its internal **8-bit DAC**.
+
+Sending high-resolution stereo audio would therefore provide little benefit while increasing:
+- Network bandwidth
+- Buffer size
+- Processing requirements
+
+The server performs:
+```text
+Original MP3
+     │
+     ▼
+Decode
+     │
+     ▼
+Resample to 24 kHz
+     │
+     ▼
+Stereo → Mono
+     │
+     ▼
+Convert to Unsigned 8-bit
+```
+
+The ESP32 receives audio in a form that closely matches what its DAC requires.
+
+---
+## Problem — Audio Streaming Reliability
+
+Streaming audio continuously introduces another challenge.
+
+The ESP32 cannot download the complete song before playback because songs can be several megabytes.
+
+Holding an entire song in RAM is impossible.
+
+The audio therefore needs to be processed continuously.
+
+---
+## Solution — Streaming PCM
+
+The ESP32 requests:
+```text
+/music/stream?id=<song_id>
+```
+
+The gateway starts FFmpeg and streams the converted PCM data as it is generated.
+
+```text
+Navidrome MP3
+      │
+      ▼
+FFmpeg
+      │
+      ▼
+Small PCM Chunks
+      │
+      ▼
+HTTP
+      │
+      ▼
+ESP32 Buffer
+      │
+      ▼
+DAC
+```
+
+Only a small amount of audio needs to exist in ESP32 memory at any given time.
+
+This creates a true streaming pipeline.
+
+---
+## Problem — Music Connection Management
+
+In the older architecture the ESP32 needed to maintain the connection all the way to Navidrome.
+
+That meant:
+```text
+ESP32
+   │
+   ├── Navidrome Authentication
+   ├── API Request
+   ├── MP3 Connection
+   ├── MP3 Decoder
+   └── DAC
+```
+
+A failure in any one component could stop the complete music system.
+
+---
+## Solution — Separate Connections
+
+V3.2 divides the music system into separate connections.
+
+```text
+Navidrome
+    │
+    │ Server Connection
+    ▼
+TimeWise Gateway
+    │
+    │ Client Connection
+    ▼
+ESP32
+```
+
+The server manages the external Navidrome connection.
+
+The ESP32 manages only the local TimeWise connection.
+
+This makes the system easier to:
+- Debug
+- Recover
+- Modify
+- Expand
+
+It also means the ESP32 does not need to understand the internal Navidrome API.
+
+---
+## Music Selection Flow
+
+Music selection now works approximately like this:
+```text
+User Presses Play Random
+        │
+        ▼
+Browser
+        │
+        ▼
+POST /api/control
+        │
+        ▼
+Gateway Command Queue
+        │
+        ▼
+ESP32
+        │
+        ▼
+POST /music/select
+        │
+        ▼
+Gateway
+        │
+        ▼
+Navidrome API
+        │
+        ▼
+Song Selected
+        │
+        ▼
+Metadata Returned to ESP32
+        │
+        ▼
+GET /music/stream
+        │
+        ▼
+PCM Playback
+```
+
+---
+## Music Audio Pipeline
+
+The final V3.2 music pipeline is:
+```text
+Navidrome
+    │
+    ▼
+MP3
+    │
+    ▼
+TimeWise Gateway
+    │
+    ▼
+FFmpeg
+    │
+    ▼
+24 kHz Unsigned 8-bit Mono PCM
+    │
+    ▼
+HTTP Stream
+    │
+    ▼
+ESP32
+    │
+    ▼
+U8 → S16
+    │
+    ▼
+Band-pass Filter
+    │
+    ▼
+Q8 Gain
+    │
+    ▼
+S16 → U8
+    │
+    ▼
+ESP32 DAC
+    │
+    ▼
+CYD Amplifier
+    │
+    ▼
+Speaker
+```
+
+---
+# Version Summary
+| Version | Major Features |
+|---|---|
+| **V1** | Time + Weather |
+| **V1.1** | Time + Weather + Alarm |
+| **V2** | ESP-IDF rewrite |
+| **V2.1** | WebSocket remote control |
+| **V2.2** | Direct Navidrome streaming and ESP32 MP3 decoding |
+| **V2.3** | Automatic night brightness, dynamic font color and improved background updates |
+| **V3** | Linux server/client architecture and HTTP gateway |
+| **V3.1** | Server-side weather API and five-hour forecast |
+| **V3.2** | Server-side Navidrome API, MP3 decoding and PCM audio streaming |
+
+The development progression can be summarized as:
+```text
+V1
+Time + Weather
+│
+▼
+V1.1
+Alarm
+│
+▼
+V2
+ESP-IDF + LVGL
+│
+▼
+V2.1
+WebSocket Control
+│
+▼
+V2.2
+Direct Navidrome + ESP32 MP3 Decode
+│
+▼
+V2.3
+Display Automation
+Brightness + Font Color + Background Updates
+│
+▼
+V3
+Linux Server / ESP32 Client
+│
+▼
+V3.1
+Server Weather + Five-Hour Forecast
+│
+▼
+V3.2
+Server Navidrome + FFmpeg + PCM Streaming
+```
 
 ## License
 
