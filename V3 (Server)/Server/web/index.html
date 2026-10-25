@@ -1,0 +1,229 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0b1220">
+
+    <title>TimeWise Control</title>
+    <link rel="icon" href="DRAW.png">
+    <link rel="stylesheet" href="style.css">
+    <script src="script.js" defer></script>
+</head>
+
+<body>
+<div class="page">
+    
+    <!-- Header -->
+    <div class="header">
+        <div class="brand">
+            <img
+                id="headerLogo"
+                class="header-logo"
+                src="Logo.png"
+                alt="TimeWise"
+                onerror="this.style.display='none';
+                document.getElementById('brandFallback')
+                .style.display='block';"
+            >
+
+            <span id="brandFallback" class="brand-fallback">
+                TimeWise
+            </span>
+        </div>
+
+        <div id="connection" class="connection">
+            Disconnected
+        </div>
+    </div>
+
+    <!-- Music -->
+    <div class="card">
+        <div class="title">Music</div>
+
+        <div class="row">
+            <span>Music Mode</span>
+            <input id="musicEnabled" type="checkbox">
+        </div>
+
+        <div id="musicTitle" class="music-title">
+            Nothing playing
+        </div>
+
+        <div id="musicArtist" class="music-artist">
+            --
+        </div>
+
+        <div id="musicAlbum" class="music-album">
+            --
+        </div>
+
+        <div class="status">
+            <span>Status</span>
+            <span id="musicState" class="value music-state">
+                Stopped
+            </span>
+        </div>
+
+        <div class="progress-track">
+            <div
+                id="musicProgressBar"
+                class="progress-fill"
+            ></div>
+        </div>
+
+        <div class="music-time">
+            <span id="musicPosition">0:00</span>
+            <span id="musicDuration">0:00</span>
+        </div>
+
+        <div class="row" style="margin-top:18px">
+            <span>Music volume</span>
+            <span id="musicVolumeValue" class="value">
+                50%
+            </span>
+        </div>
+
+        <input
+            id="musicVolume"
+            type="range"
+            min="0"
+            max="100"
+            value="50"
+        >
+
+        <div class="button-row music-buttons">
+            <button id="musicPreviousButton">
+                Previous
+            </button>
+
+            <button id="musicPlayButton" class="primary">
+                Play Random
+            </button>
+
+            <button id="musicPauseButton" class="pause">
+                Pause
+            </button>
+
+            <button id="musicNextButton">
+                Next
+            </button>
+
+            <button id="musicStopButton" class="stop">
+                Stop
+            </button>
+        </div>
+    </div>
+
+    <!-- System volume -->
+    <div class="card">
+        <div class="title">Volume</div>
+
+        <div class="row">
+            <span>Alarm / system volume</span>
+            <span id="volumeValue" class="value">
+                50%
+            </span>
+        </div>
+
+        <input
+            id="volume"
+            type="range"
+            min="0"
+            max="100"
+            value="50"
+        >
+    </div>
+
+    <!-- Brightness -->
+    <div class="card">
+        <div class="title">Brightness</div>
+
+        <div class="row">
+            <span>Selected brightness</span>
+            <span id="brightnessValue" class="value">
+                100%
+            </span>
+        </div>
+
+        <input
+            id="brightness"
+            type="range"
+            min="0"
+            max="100"
+            value="100"
+        >
+
+        <div class="status">
+            <span>Effective brightness</span>
+            <span id="effectiveBrightness">100%</span>
+        </div>
+
+        <div class="status">
+            <span>Display mode</span>
+            <span id="dayMode">Day</span>
+        </div>
+
+        <div class="note">
+            Display brightness follows the
+            ESP32's configured day/night rules.
+        </div>
+    </div>
+
+    <!-- Alarm -->
+    <div class="card">
+        <div class="title">Alarm</div>
+
+        <input
+            id="alarmTime"
+            type="time"
+            value="07:45"
+        >
+
+        <div class="row" style="margin-top:16px">
+            <span>Alarm enabled</span>
+            <input
+                id="alarmEnabled"
+                type="checkbox"
+                checked
+            >
+        </div>
+
+        <div class="status">
+            <span>Alarm status</span>
+            <span id="alarmStatus">Idle</span>
+        </div>
+
+        <div class="status">
+            <span>Snooze status</span>
+            <span id="snoozeStatus">Not scheduled</span>
+        </div>
+    </div>
+
+    <!-- Alarm control -->
+    <div class="card">
+        <div class="title">Alarm Control</div>
+
+        <select id="snoozeMinutes">
+            <option value="5">Snooze 5 minutes</option>
+            <option value="10">Snooze 10 minutes</option>
+            <option value="15">Snooze 15 minutes</option>
+            <option value="30">Snooze 30 minutes</option>
+        </select>
+
+        <div class="button-row">
+            <button id="snoozeButton" class="snooze">
+                Snooze
+            </button>
+
+            <button id="stopButton" class="stop">
+                Stop
+            </button>
+        </div>
+    </div>
+
+</div>
+</body>
+</html>

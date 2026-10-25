@@ -1,0 +1,284 @@
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    min-height: 100vh;
+    font-family: Arial, sans-serif;
+    background: #0b1220;
+    color: #eef4ff;
+}
+
+.page {
+    width: min(600px, 100%);
+    margin: auto;
+    padding: 22px;
+}
+
+/* Header */
+
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 20px;
+    min-height: 68px;
+}
+
+.brand {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.header-logo {
+    display: block;
+    width: 230px;
+    height: 64px;
+    max-width: 60vw;
+    object-fit: contain;
+    object-position: left center;
+}
+
+.brand-fallback {
+    display: none;
+    font-size: 28px;
+    font-weight: 700;
+    color: #ffffff;
+}
+
+.connection {
+    flex-shrink: 0;
+    font-size: 13px;
+    padding: 7px 11px;
+    border-radius: 20px;
+    background: #5d2630;
+    color: #ffd7dc;
+}
+
+.connection.connected {
+    background: #174d38;
+    color: #caffdf;
+}
+
+/* Cards */
+
+.card {
+    background: #172235;
+    border: 1px solid #263751;
+    border-radius: 18px;
+    padding: 18px;
+    margin-bottom: 15px;
+    box-shadow: 0 8px 25px rgba(0, 0, 0, 0.22);
+}
+
+.title {
+    font-size: 19px;
+    font-weight: bold;
+    margin-bottom: 16px;
+}
+
+.row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+.value {
+    color: #77dff5;
+    font-weight: bold;
+}
+
+.status {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    padding-top: 12px;
+    font-size: 14px;
+    color: #b9c8dd;
+}
+
+.note {
+    margin-top: 9px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: #8fa2bd;
+}
+
+/* Gateway login */
+
+.gateway-login {
+    display: grid;
+    gap: 12px;
+}
+
+.gateway-login input[type="password"] {
+    width: 100%;
+    padding: 12px;
+    border: 1px solid #385070;
+    border-radius: 11px;
+    background: #0d1728;
+    color: #fff;
+}
+
+.gateway-login .note {
+    margin-top: 0;
+}
+
+/* Music */
+
+.music-title {
+    min-height: 30px;
+    margin-bottom: 7px;
+    font-size: 24px;
+    font-weight: 700;
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+}
+
+.music-artist {
+    min-height: 20px;
+    margin-bottom: 5px;
+    font-size: 16px;
+    color: #c0cee1;
+    overflow-wrap: anywhere;
+}
+
+.music-album {
+    min-height: 18px;
+    margin-bottom: 16px;
+    font-size: 13px;
+    color: #8397b3;
+    overflow-wrap: anywhere;
+}
+
+.music-state {
+    text-transform: capitalize;
+}
+
+.progress-track {
+    width: 100%;
+    height: 7px;
+    margin-top: 15px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: #0d1728;
+}
+
+.progress-fill {
+    width: 0%;
+    height: 100%;
+    border-radius: inherit;
+    background: #38e6ff;
+    transition: width 0.25s linear;
+}
+
+.music-time {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 8px;
+    font-size: 13px;
+    color: #9eb0ca;
+}
+
+/* Inputs */
+
+input[type="range"] {
+    width: 100%;
+    accent-color: #38e6ff;
+}
+
+input[type="time"],
+select {
+    width: 100%;
+    padding: 13px;
+    font-size: 18px;
+    border: 1px solid #385070;
+    border-radius: 11px;
+    background: #0d1728;
+    color: #ffffff;
+}
+
+input[type="checkbox"] {
+    width: 24px;
+    height: 24px;
+    accent-color: #38e6ff;
+}
+
+/* Buttons */
+
+.button-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 11px;
+    margin-top: 14px;
+}
+
+.music-buttons {
+    grid-template-columns: repeat(3, 1fr);
+}
+
+button {
+    border: 0;
+    border-radius: 12px;
+    padding: 14px 8px;
+    font-size: 15px;
+    font-weight: bold;
+    cursor: pointer;
+    background: #27415e;
+    color: #ffffff;
+}
+
+button:disabled {
+    opacity: 0.42;
+    cursor: not-allowed;
+}
+
+.primary {
+    background: #2b85b3;
+    color: #ffffff;
+}
+
+.pause,
+.snooze {
+    background: #e4b64e;
+    color: #171717;
+}
+
+.stop {
+    background: #e65a6b;
+    color: #ffffff;
+}
+
+/* Mobile */
+
+@media (max-width: 430px) {
+    .page {
+        padding: 16px;
+    }
+
+    .header {
+        gap: 10px;
+    }
+
+    .header-logo {
+        width: 175px;
+        height: 52px;
+        max-width: 55vw;
+    }
+
+    .connection {
+        font-size: 12px;
+        padding: 6px 9px;
+    }
+
+    .music-buttons {
+        grid-template-columns: 1fr 1fr;
+    }
+}
