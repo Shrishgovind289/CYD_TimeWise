@@ -1,5 +1,6 @@
 #include "WeatherStation.h"
 #include "NTPClock.h"
+#include "HTTPControl.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -11,11 +12,12 @@
 #include "esp_err.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "cJSON.h"
 
-#define WEATHER_SERVER_URL "HTTP_GATEWAY_IP:8766/weather"  // This should be defined elsewhere, e.g., in a config header
-#define FORECAST_SERVER_URL "HTTP_GATEWAY_IP:8766/forecast"  // This should be defined elsewhere, e.g., in a config header
-#define WEATHER_RESPONSE_MAX_SIZE 3072U
+#define WEATHER_SERVER_URL "http://192.168.0.249:8766/weather"
+#define FORECAST_SERVER_URL "http://192.168.0.249:8766/forecast"
+#define WEATHER_RESPONSE_MAX_SIZE 4096U
 #define WEATHER_MOON_OFFSET_MINUTES 35
 
 static const char *TAG = "WeatherStation";
@@ -298,8 +300,7 @@ static esp_err_t on_http_event(esp_http_client_event_t *event)
     }
     weather_response_t *response = (weather_response_t *)event->user_data;
     const size_t bytes = (size_t)event->data_len;
-    if (bytes >= sizeof(response->data) ||
-        response->length > sizeof(response->data) - 1U - bytes)
+    if (bytes >= sizeof(response->data) || response->length > sizeof(response->data) - 1U - bytes)
     {
         response->overflow = true;
         return ESP_ERR_NO_MEM;
@@ -312,8 +313,7 @@ static esp_err_t on_http_event(esp_http_client_event_t *event)
 
 /* Parse local ISO time, then shift minutes across calendar boundaries.
    mktime/localtime use the TZ set by NTPClock, handling DST transitions. */
-static bool shift_iso_minutes(const char *input, int delta,
-                              char *out, size_t out_capacity)
+static bool shift_iso_minutes(const char *input, int delta, char *out, size_t out_capacity)
 {
     if (input == NULL || out == NULL || out_capacity < 17U)
     {
@@ -321,10 +321,8 @@ static bool shift_iso_minutes(const char *input, int delta,
     }
     struct tm local = {0};
     int year, month, day, hour, minute;
-    if (sscanf(input, "%d-%d-%dT%d:%d", &year, &month, &day,
-               &hour, &minute) != 5 || year < 2024 ||
-        month < 1 || month > 12 || day < 1 || day > 31 ||
-        hour < 0 || hour > 23 || minute < 0 || minute > 59)
+    if (sscanf(input, "%d-%d-%dT%d:%d", &year, &month, &day, &hour, &minute) != 5 || 
+        year < 2024 || month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23 || minute < 0 || minute > 59)
     {
         return false;
     }
@@ -340,8 +338,7 @@ static bool shift_iso_minutes(const char *input, int delta,
         return false;
     }
     struct tm normalized;
-    return localtime_r(&adjusted, &normalized) != NULL &&
-           strftime(out, out_capacity, "%Y-%m-%dT%H:%M", &normalized) != 0;
+    return localtime_r(&adjusted, &normalized) != NULL && strftime(out, out_capacity, "%Y-%m-%dT%H:%M", &normalized) != 0;
 }
 
 static const char *json_string(const cJSON *object, const char *key)
@@ -351,8 +348,7 @@ static const char *json_string(const cJSON *object, const char *key)
 }
 
 /* The server supplies local hourly ISO strings. Keep time formatting local to ESP32. */
-static void parse_forecast(const cJSON *root, const struct tm *now,
-                           weatherstation_update_t *update)
+static void parse_forecast(const cJSON *root, const struct tm *now, weatherstation_update_t *update)
 {
     const cJSON *hourly = cJSON_GetObjectItemCaseSensitive(root, "hourly");
     if (!cJSON_IsArray(hourly))
@@ -373,8 +369,7 @@ static void parse_forecast(const cJSON *root, const struct tm *now,
         const cJSON *temp = cJSON_GetObjectItemCaseSensitive(entry, "temperature_2m");
         const cJSON *code = cJSON_GetObjectItemCaseSensitive(entry, "weather_code");
         const cJSON *day = cJSON_GetObjectItemCaseSensitive(entry, "is_day");
-        if (iso == NULL || strlen(iso) < 16U ||
-            !cJSON_IsNumber(temp) || !cJSON_IsNumber(code) ||
+        if (iso == NULL || strlen(iso) < 16U || !cJSON_IsNumber(temp) || !cJSON_IsNumber(code) ||
             !(cJSON_IsBool(day) || cJSON_IsNumber(day)) ||
             strncmp(iso, now_hour, sizeof(now_hour) - 1U) <= 0)
         {
@@ -429,8 +424,7 @@ static bool parse_weather(const char *data, size_t length)
         const cJSON *temperature = cJSON_GetObjectItemCaseSensitive(root, "temperature");
         const cJSON *code = cJSON_GetObjectItemCaseSensitive(root, "weather_code");
         const cJSON *daily = cJSON_GetObjectItemCaseSensitive(root, "daily");
-        if (!cJSON_IsNumber(temperature) || !cJSON_IsNumber(code) ||
-            !cJSON_IsArray(daily))
+        if (!cJSON_IsNumber(temperature) || !cJSON_IsNumber(code) || !cJSON_IsArray(daily))
         {
             ESP_LOGE(TAG, "Missing temperature, weather_code or daily array");
             break;
@@ -440,17 +434,18 @@ static bool parse_weather(const char *data, size_t length)
         const cJSON *yesterday_entry = NULL;
         const cJSON *tomorrow_entry = NULL;
         char yesterday[11], tomorrow[11];
+
         struct tm shifted = now;
         shifted.tm_mday -= 1;
         shifted.tm_isdst = -1;
-        if (mktime(&shifted) == (time_t)-1 ||
-            strftime(yesterday, sizeof(yesterday), "%Y-%m-%d", &shifted) == 0)
+        if (mktime(&shifted) == (time_t)-1 || strftime(yesterday, sizeof(yesterday), "%Y-%m-%d", &shifted) == 0)
             break;
+
         shifted = now;
         shifted.tm_mday += 1;
         shifted.tm_isdst = -1;
-        if (mktime(&shifted) == (time_t)-1 ||
-            strftime(tomorrow, sizeof(tomorrow), "%Y-%m-%d", &shifted) == 0)
+
+        if (mktime(&shifted) == (time_t)-1 || strftime(tomorrow, sizeof(tomorrow), "%Y-%m-%d", &shifted) == 0)
             break;
 
         const cJSON *entry = NULL;
@@ -469,41 +464,37 @@ static bool parse_weather(const char *data, size_t length)
         }
         const char *sunrise = json_string(today_entry, "sunrise");
         const char *sunset = json_string(today_entry, "sunset");
-        if (sunrise == NULL || sunset == NULL || strlen(sunrise) < 16U ||
-            strlen(sunset) < 16U)
+        if (sunrise == NULL || sunset == NULL || strlen(sunrise) < 16U || strlen(sunset) < 16U)
         {
             ESP_LOGE(TAG, "Missing sunrise/sunset for %s", today);
             break;
         }
+        
         copy_text(update.current_time, sizeof(update.current_time), now_iso);
         copy_text(update.sunrise_time, sizeof(update.sunrise_time), sunrise);
         copy_text(update.sunset_time, sizeof(update.sunset_time), sunset);
         copy_text(update.location, sizeof(update.location), s_location_name);
+        
         update.temperature_c = (float)temperature->valuedouble;
         update.weather_code = code->valueint;
-        update.is_day = strcmp(now_iso, sunrise) >= 0 &&
-                        strcmp(now_iso, sunset) < 0;
-        copy_text(update.condition, sizeof(update.condition),
-                  weatherstation_condition_from_code(update.weather_code));
-        update.background_path = weatherstation_select_background(
-            update.weather_code, update.is_day);
-        update.icon_path = weatherstation_select_icon(
-            update.weather_code, update.is_day);
+        update.is_day = strcmp(now_iso, sunrise) >= 0 && strcmp(now_iso, sunset) < 0;
+        
+        copy_text(update.condition, sizeof(update.condition), weatherstation_condition_from_code(update.weather_code));
+        
+        update.background_path = weatherstation_select_background(update.weather_code, update.is_day);
+        update.icon_path = weatherstation_select_icon(update.weather_code, update.is_day);
 
         char early_moonset[WEATHERSTATION_ISO_TIME_LENGTH];
-        if (!shift_iso_minutes(sunrise, -WEATHER_MOON_OFFSET_MINUTES,
-                               early_moonset, sizeof(early_moonset)))
+        if (!shift_iso_minutes(sunrise, -WEATHER_MOON_OFFSET_MINUTES, early_moonset, sizeof(early_moonset)))
         {
             ESP_LOGE(TAG, "Could not calculate assumed moonset");
             break;
         }
         if (strcmp(now_iso, early_moonset) <= 0)
         {
-            const char *previous_sunset = yesterday_entry == NULL ? NULL :
-                json_string(yesterday_entry, "sunset");
-            if (previous_sunset == NULL ||
-                !shift_iso_minutes(previous_sunset, WEATHER_MOON_OFFSET_MINUTES,
-                                   update.moonrise_time, sizeof(update.moonrise_time)))
+            const char *previous_sunset = yesterday_entry == NULL ? NULL : json_string(yesterday_entry, "sunset");
+
+            if (previous_sunset == NULL || !shift_iso_minutes(previous_sunset, WEATHER_MOON_OFFSET_MINUTES, update.moonrise_time, sizeof(update.moonrise_time)))
             {
                 ESP_LOGW(TAG, "Missing previous day's sunset for moon arc");
                 break;
@@ -515,10 +506,8 @@ static bool parse_weather(const char *data, size_t length)
             const char *next_sunrise = tomorrow_entry == NULL ? NULL :
                 json_string(tomorrow_entry, "sunrise");
             if (next_sunrise == NULL ||
-                !shift_iso_minutes(sunset, WEATHER_MOON_OFFSET_MINUTES,
-                                   update.moonrise_time, sizeof(update.moonrise_time)) ||
-                !shift_iso_minutes(next_sunrise, -WEATHER_MOON_OFFSET_MINUTES,
-                                   update.moonset_time, sizeof(update.moonset_time)))
+                !shift_iso_minutes(sunset, WEATHER_MOON_OFFSET_MINUTES, update.moonrise_time, sizeof(update.moonrise_time)) ||
+                !shift_iso_minutes(next_sunrise, -WEATHER_MOON_OFFSET_MINUTES, update.moonset_time, sizeof(update.moonset_time)))
             {
                 ESP_LOGW(TAG, "Missing next day's sunrise for moon arc");
                 break;
@@ -540,13 +529,9 @@ static bool parse_weather(const char *data, size_t length)
     return true;
 }
 
-esp_err_t weatherstation_init(double latitude, double longitude,
-                              const char *location_name,
-                              weatherstation_update_callback_t callback)
+esp_err_t weatherstation_init(double latitude, double longitude, const char *location_name, weatherstation_update_callback_t callback)
 {
-    if (latitude < -90.0 || latitude > 90.0 ||
-        longitude < -180.0 || longitude > 180.0 ||
-        location_name == NULL || callback == NULL)
+    if (latitude < -90.0 || latitude > 90.0 || longitude < -180.0 || longitude > 180.0 || location_name == NULL || callback == NULL)
         return ESP_ERR_INVALID_ARG;
 
     /* Coordinates are configured on the Inspiron; validate here for
@@ -560,64 +545,129 @@ esp_err_t weatherstation_init(double latitude, double longitude,
 static esp_err_t weatherstation_fetch(const char *url, weather_response_t *response)
 {
     memset(response, 0, sizeof(*response));
+
+    /* Wait for command polling / state posting to finish before opening the
+       weather connection. The mutex is held only during HTTP I/O. */
+    if (!http_control_http_acquire(15000U))
+    {
+        ESP_LOGW(TAG, "HTTP busy: weather request deferred");
+        return ESP_ERR_TIMEOUT;
+    }
+
     esp_http_client_config_t config = {
         .url = url,
         .event_handler = on_http_event,
         .user_data = response,
         .timeout_ms = 5000,
         .buffer_size = 1024,
+        .buffer_size_tx = 512,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (client == NULL) return ESP_ERR_NO_MEM;
+    if (client == NULL)
+    {
+        http_control_http_release();
+        return ESP_ERR_NO_MEM;
+    }
 
     ESP_LOGI(TAG, "Requesting %s from Inspiron", url);
     esp_err_t result = esp_http_client_perform(client);
     const int status = result == ESP_OK ? esp_http_client_get_status_code(client) : 0;
     esp_http_client_cleanup(client);
+    http_control_http_release();
+
+    if (result != ESP_OK)
+    {
+        ESP_LOGW(TAG, "HTTP failure memory: free=%lu largest=%lu",
+                 (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
 
     if (result != ESP_OK)
         ESP_LOGE(TAG, "Local weather request failed: %s", esp_err_to_name(result));
     else if (status != 200)
     {
         ESP_LOGW(TAG, "Weather HTTP status %d", status);
+
         result = ESP_FAIL;
     }
     else if (response->overflow || response->length == 0U)
     {
-        ESP_LOGE(TAG, "Weather response empty or exceeds %u bytes",
-                 (unsigned int)WEATHER_RESPONSE_MAX_SIZE);
+        ESP_LOGE(TAG, "Weather response empty or exceeds %u bytes", (unsigned int)WEATHER_RESPONSE_MAX_SIZE);
+
         result = ESP_ERR_INVALID_SIZE;
     }
     return result;
 }
 
-esp_err_t weatherstation_request(void)
+
+esp_err_t weatherstation_request(bool is_forecast)
 {
     weather_response_t response = {0};
-    esp_err_t result = weatherstation_fetch(WEATHER_SERVER_URL, &response);
-    if (result == ESP_OK && !parse_weather(response.data, response.length))
-        result = ESP_ERR_INVALID_RESPONSE;
-    return result;
+
+    const char *url = is_forecast
+        ? FORECAST_SERVER_URL
+        : WEATHER_SERVER_URL;
+
+    // Request JSON from the Inspiron server
+    esp_err_t result = weatherstation_fetch(url, &response);
+
+    if (result != ESP_OK)
+    {
+        return result;
+    }
+
+    // Current weather
+    if (!is_forecast)
+    {
+        if (!parse_weather(response.data, response.length))
+        {
+            return ESP_ERR_INVALID_RESPONSE;
+        }
+
+        return ESP_OK;
+    }
+
+    // Hourly forecast
+    struct tm now = {0};
+
+    if (!ntpclock_get_local_time(&now))
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    cJSON *root = cJSON_ParseWithLength(
+        response.data,
+        response.length
+    );
+
+    if (root == NULL)
+    {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    weatherstation_update_t update = {0};
+
+    parse_forecast(root, &now, &update);
+
+    cJSON_Delete(root);
+
+    if (update.hourly_count == 0U)
+    {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    if (s_forecast_callback != NULL)
+    {
+        s_forecast_callback(
+            update.hourly,
+            update.hourly_count
+        );
+    }
+
+    return ESP_OK;
 }
 
 void weatherstation_set_forecast_callback(weatherstation_forecast_callback_t callback)
 {
     s_forecast_callback = callback;
-}
-
-esp_err_t weatherstation_request_forecast(void)
-{
-    weather_response_t response = {0};
-    esp_err_t result = weatherstation_fetch(FORECAST_SERVER_URL, &response);
-    if (result != ESP_OK) return result;
-    struct tm now = {0};
-    if (!ntpclock_get_local_time(&now)) return ESP_ERR_INVALID_STATE;
-    cJSON *root = cJSON_ParseWithLength(response.data, response.length);
-    if (!root) return ESP_ERR_INVALID_RESPONSE;
-    weatherstation_update_t update = {0};
-    parse_forecast(root, &now, &update);
-    cJSON_Delete(root);
-    if (update.hourly_count == 0U) return ESP_ERR_NOT_FOUND;
-    if (s_forecast_callback) s_forecast_callback(update.hourly, update.hourly_count);
-    return ESP_OK;
 }

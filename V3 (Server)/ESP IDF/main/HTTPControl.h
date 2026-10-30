@@ -27,6 +27,18 @@ void http_control_set_music_action_callback(http_music_action_callback_t callbac
 bool http_control_get_music_enabled(void);
 esp_err_t http_control_start(void);
 void http_control_stop(void);
+
+/* Shared serialization for all ESP32 gateway HTTP transactions. */
+bool http_control_http_acquire(uint32_t timeout_ms);
+void http_control_http_release(void);
+
+esp_err_t http_control_sync_init(void);
+
+/* LVGL owns the shared resource lock while it renders and flushes. */
+bool http_control_display_priority_active(void);
+
+/* Prevent NEW application HTTP transactions in the 00-10 second window. */
+void http_control_set_display_priority(bool enabled);
 /* The HTTP task remains running in both operating modes. */
 esp_err_t http_control_enter_music_mode(void);
 esp_err_t http_control_exit_music_mode(void);

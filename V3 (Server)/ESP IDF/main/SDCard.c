@@ -13,6 +13,13 @@
 #include "driver/sdspi_host.h"
 #include "sdmmc_cmd.h"
 
+#include <stdarg.h>
+#include <stdint.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+
 static const char *TAG = "SDCard";
 
 static sdmmc_card_t *sd_card = NULL;
@@ -84,7 +91,8 @@ esp_err_t sdcard_init(void)
              SDCARD_PIN_MISO);
 
     ret = sdcard_enable_pullups();
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK) 
+    {
         ESP_LOGE(TAG, "Failed to enable SD card pullups");
         return ret;
     }
@@ -93,7 +101,8 @@ esp_err_t sdcard_init(void)
     host.slot = SDCARD_SPI_HOST;
     host.max_freq_khz = SDCARD_FREQ_KHZ;
 
-    spi_bus_config_t bus_config = {
+    spi_bus_config_t bus_config = 
+    {
         .mosi_io_num = SDCARD_PIN_MOSI,
         .miso_io_num = SDCARD_PIN_MISO,
         .sclk_io_num = SDCARD_PIN_SCLK,
@@ -104,12 +113,17 @@ esp_err_t sdcard_init(void)
 
     ret = spi_bus_initialize(host.slot, &bus_config, SDSPI_DEFAULT_DMA);
 
-    if (ret == ESP_OK) {
+    if (ret == ESP_OK) 
+    {
         spi_bus_was_initialized_here = 1;
-    } else if (ret == ESP_ERR_INVALID_STATE) {
+    } 
+    else if (ret == ESP_ERR_INVALID_STATE) 
+    {
         ESP_LOGW(TAG, "SPI bus already initialized, continuing");
         spi_bus_was_initialized_here = 0;
-    } else {
+    } 
+    else 
+    {
         ESP_LOGE(TAG, "SPI bus init failed: %s", esp_err_to_name(ret));
         return ret;
     }
@@ -155,18 +169,25 @@ esp_err_t sdcard_init(void)
 
 esp_err_t sdcard_deinit(void)
 {
-    if (!sdcard_mounted) {
+    if (!sdcard_mounted) 
+    {
         return ESP_OK;
     }
 
     ESP_LOGI(TAG, "Unmounting SD card");
 
-    esp_vfs_fat_sdcard_unmount(SDCARD_MOUNT_POINT, sd_card);
+    esp_err_t unmount_result = esp_vfs_fat_sdcard_unmount(SDCARD_MOUNT_POINT, sd_card);
+    if (unmount_result != ESP_OK)
+    {
+        ESP_LOGE(TAG, "SD unmount failed: %s", esp_err_to_name(unmount_result));
+        return unmount_result;
+    }
 
     sd_card = NULL;
     sdcard_mounted = 0;
 
-    if (spi_bus_was_initialized_here) {
+    if (spi_bus_was_initialized_here) 
+    {
         spi_bus_free(SDCARD_SPI_HOST);
         spi_bus_was_initialized_here = 0;
     }
@@ -219,23 +240,27 @@ static esp_err_t sdcard_list_dir_internal(const char *path, int max_depth, int c
         return ESP_FAIL;
     }
 
-    while ((entry = readdir(dir)) != NULL) {
+    while ((entry = readdir(dir)) != NULL) 
+    {
         char child_path[512];
         struct stat child_stat;
         int written;
 
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) 
+        {
             continue;
         }
 
         written = snprintf(child_path, sizeof(child_path), "%s/%s", path, entry->d_name);
 
-        if (written < 0 || written >= (int)sizeof(child_path)) {
+        if (written < 0 || written >= (int)sizeof(child_path)) 
+        {
             ESP_LOGW(TAG, "Skipping path because it is too long");
             continue;
         }
 
-        if (stat(child_path, &child_stat) != 0) {
+        if (stat(child_path, &child_stat) != 0) 
+        {
             ESP_LOGW(TAG, "Could not stat path: %s", child_path);
             continue;
         }

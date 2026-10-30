@@ -1,3 +1,4 @@
+#include "sdkconfig.h"
 #include "HTTPControl.h"
 #include "Audio.h"
 #include "MusicStream.h"
@@ -14,22 +15,85 @@
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 static const char *TAG = "HTTPControl";
 
 /* Set the IP to the Linux Gateway's reachable LAN address, not localhost. */
-char g_timewise_gateway_url[128] = "HTTP_GATEWAY_URL";
+char g_timewise_gateway_url[128] = "http://192.168.0.249:8766";
 /* Replace using the token from /etc/timewise-gateway.env. Do not commit a real token. */
-char g_timewise_device_token[65] = "DEVICE_TOKEN";
+char g_timewise_device_token[65] = CONFIG_TIMEWISE_DEVICE_TOKEN;
 
-#define HTTP_POLL_INTERVAL_MS       2000U
-#define HTTP_STATE_INTERVAL_MS      6000U
+#define HTTP_POLL_INTERVAL_MS       10000U
+#define HTTP_STATE_INTERVAL_MS      60000U
 #define HTTP_REQUEST_TIMEOUT_MS    3000
 #define HTTP_TASK_STACK_SIZE       6144U
-#define HTTP_RESPONSE_CAPACITY     8192U
+#define HTTP_RESPONSE_CAPACITY     2048U
 
 static TaskHandle_t s_http_task = NULL;
+static SemaphoreHandle_t s_gateway_http_mutex = NULL;
+static volatile bool s_display_priority = true;
+
+esp_err_t http_control_sync_init(void)
+{
+    if (s_gateway_http_mutex == NULL)
+    {
+        s_gateway_http_mutex = xSemaphoreCreateMutex();
+    }
+    return s_gateway_http_mutex != NULL ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
+void http_control_set_display_priority(bool enabled)
+{
+    __atomic_store_n(&s_display_priority, enabled, __ATOMIC_RELEASE);
+}
+
+bool http_control_display_priority_active(void)
+{
+    return __atomic_load_n(&s_display_priority, __ATOMIC_ACQUIRE);
+}
+
+bool http_control_http_acquire(uint32_t timeout_ms)
+{
+    if (s_gateway_http_mutex == NULL)
+    {
+        return false;
+    }
+
+    TickType_t start = xTaskGetTickCount();
+    TickType_t budget = pdMS_TO_TICKS(timeout_ms);
+
+    while (true)
+    {
+        if (!http_control_display_priority_active())
+        {
+            if (xSemaphoreTake(s_gateway_http_mutex, pdMS_TO_TICKS(50U)) == pdTRUE)
+            {
+                if (!http_control_display_priority_active())
+                {
+                    return true;
+                }
+                xSemaphoreGive(s_gateway_http_mutex);
+            }
+        }
+
+        if (timeout_ms == 0U || (TickType_t)(xTaskGetTickCount() - start) >= budget)
+        {
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20U));
+    }
+}
+
+void http_control_http_release(void)
+{
+    if (s_gateway_http_mutex != NULL)
+    {
+        xSemaphoreGive(s_gateway_http_mutex);
+    }
+}
+
 static volatile bool s_running = false;
 static volatile bool s_music_enabled = false;
 static http_music_action_callback_t s_music_callback = NULL;
@@ -252,14 +316,32 @@ static void http_control_task(void *unused)
     (void)unused;
     TickType_t last_report = 0;
     while (s_running) {
-        esp_err_t error = fetch_commands();
-        if (error != ESP_OK) ESP_LOGW(TAG, "Command poll: %s", esp_err_to_name(error));
+        /* Polling is best-effort. Avoid allocating JSON/HTTP resources while
+           weather or forecast owns the network transaction. */
+        if (http_control_http_acquire(100U))
+        {
+            esp_err_t error = fetch_commands();
+            http_control_http_release();
+            if (error != ESP_OK)
+            {
+                ESP_LOGW(TAG, "Command poll: %s", esp_err_to_name(error));
+            }
+        }
 
         TickType_t now = xTaskGetTickCount();
-        if (last_report == 0 || (TickType_t)(now - last_report) >= pdMS_TO_TICKS(HTTP_STATE_INTERVAL_MS)) {
-            error = post_state();
-            if (error != ESP_OK) ESP_LOGW(TAG, "State report: %s", esp_err_to_name(error));
-            last_report = now;
+        if (last_report == 0 ||
+            (TickType_t)(now - last_report) >= pdMS_TO_TICKS(HTTP_STATE_INTERVAL_MS))
+        {
+            if (http_control_http_acquire(100U))
+            {
+                esp_err_t error = post_state();
+                http_control_http_release();
+                if (error != ESP_OK)
+                {
+                    ESP_LOGW(TAG, "State report: %s", esp_err_to_name(error));
+                }
+                last_report = now;
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(HTTP_POLL_INTERVAL_MS));
     }
@@ -283,6 +365,12 @@ esp_err_t http_control_start(void)
         ESP_LOGE(TAG, "Configure the gateway device token before starting");
         return ESP_ERR_INVALID_STATE;
     }
+    esp_err_t init_result = http_control_sync_init();
+    if (init_result != ESP_OK)
+    {
+        return init_result;
+    }
+
     s_running = true;
     if (xTaskCreatePinnedToCore(http_control_task, "http_control",
                                 HTTP_TASK_STACK_SIZE, NULL, 3, &s_http_task, 0) != pdPASS) {

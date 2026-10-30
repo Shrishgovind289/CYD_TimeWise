@@ -10,7 +10,6 @@ idf_component_register(
         "moon.c"
         "HTTPControl.c"
         "MusicStream.c"
-        "LED.c"
        
        
     INCLUDE_DIRS "."

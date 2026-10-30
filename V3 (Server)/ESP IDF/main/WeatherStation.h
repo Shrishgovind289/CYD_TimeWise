@@ -9,7 +9,7 @@
 #define WEATHERSTATION_ISO_TIME_LENGTH         24U
 #define WEATHERSTATION_CONDITION_LENGTH        64U
 #define WEATHERSTATION_LOCATION_LENGTH         96U
-#define WEATHERSTATION_FORECAST_HOURS            5U
+#define WEATHERSTATION_FORECAST_HOURS            4U
 #define WEATHERSTATION_FORECAST_TIME_LENGTH      12U
 
 typedef struct
@@ -55,13 +55,11 @@ typedef void (*weatherstation_forecast_callback_t)(const weatherstation_forecast
 
 /*
  * Store location label and callback; coordinates are configured on Inspiron.
- *
  * This function does not create a task and does not make an HTTP request.
  */
 esp_err_t weatherstation_init(double latitude, double longitude, const char *location_name, weatherstation_update_callback_t callback);
 
-esp_err_t weatherstation_request(void);
+esp_err_t weatherstation_request(bool is_forecast);
 void weatherstation_set_forecast_callback(weatherstation_forecast_callback_t callback);
-esp_err_t weatherstation_request_forecast(void);
 
 #endif /* WEATHER_STATION_H */

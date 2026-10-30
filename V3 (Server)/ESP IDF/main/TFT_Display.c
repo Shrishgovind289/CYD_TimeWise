@@ -90,7 +90,7 @@ LV_IMAGE_DECLARE(moon);
 #define TFT_LVGL_STOP_WAIT_MS            1000U
 #define TFT_LVGL_STOP_POLL_MS            10U
 
-#define TFT_FORECAST_COUNT               5U
+#define TFT_FORECAST_COUNT               4U
 
 /* -------------------------------------------------------------------------- */
 /*                          Raw image configuration                           */
@@ -153,6 +153,8 @@ static esp_lcd_panel_handle_t s_panel_handle = NULL;
 static esp_lcd_panel_io_handle_t s_io_handle = NULL;
 static esp_timer_handle_t s_lvgl_tick_timer = NULL;
 static TaskHandle_t s_lvgl_task_handle = NULL;
+/* SPI transfers may still be in flight after lv_timer_handler() returns. */
+static uint32_t s_pending_color_transfers = 0U;
 
 static lv_image_decoder_t *s_background_decoder = NULL;
 
@@ -205,7 +207,7 @@ volatile bool g_display_is_day = true;
 volatile bool g_tft_display_paused = false;
 
 static bool s_backlight_initialized = false;
-static portMUX_TYPE s_backlight_lock = portMUX_INITIALIZER_UNLOCKED;
+//static portMUX_TYPE s_backlight_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static bool s_dashboard_created = false;
 
@@ -926,8 +928,15 @@ static bool tft_display_notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_
     (void)event_data;
 
     lv_display_flush_ready((lv_display_t *)user_context);
+    __atomic_sub_fetch(&s_pending_color_transfers, 1U, __ATOMIC_RELEASE);
 
-    return false;
+    BaseType_t higher_priority_woken = pdFALSE;
+    TaskHandle_t task = s_lvgl_task_handle;
+    if (task != NULL)
+    {
+        vTaskNotifyGiveFromISR(task, &higher_priority_woken);
+    }
+    return higher_priority_woken == pdTRUE;
 }
 
 static void tft_display_flush_callback(lv_display_t *display, const lv_area_t *area, uint8_t *pixel_map)
@@ -941,7 +950,14 @@ static void tft_display_flush_callback(lv_display_t *display, const lv_area_t *a
 
     lv_draw_sw_rgb565_swap(pixel_map, (uint32_t)((x2 + 1 - x1) * (y2 + 1 - y1)));
 
-    esp_lcd_panel_draw_bitmap(panel_handle, x1, y1, x2 + 1, y2 + 1, pixel_map);
+    __atomic_add_fetch(&s_pending_color_transfers, 1U, __ATOMIC_RELEASE);
+    esp_err_t result = esp_lcd_panel_draw_bitmap(panel_handle, x1, y1, x2 + 1, y2 + 1, pixel_map);
+    if (result != ESP_OK)
+    {
+        __atomic_sub_fetch(&s_pending_color_transfers, 1U, __ATOMIC_RELEASE);
+        ESP_LOGE(TAG, "Display SPI transfer failed: %s", esp_err_to_name(result));
+        lv_display_flush_ready(display);
+    }
 }
 
 static void tft_display_lvgl_task(void *argument)
@@ -952,16 +968,22 @@ static void tft_display_lvgl_task(void *argument)
 
     while (!g_tft_display_paused)
     {
-        _lock_acquire(
-            &s_lvgl_api_lock
-        );
+        _lock_acquire(&s_lvgl_api_lock);
+        uint32_t delay_ms = lv_timer_handler();
+        _lock_release(&s_lvgl_api_lock);
 
-        uint32_t delay_ms =
-            lv_timer_handler();
+        /* The SPI panel callback signals completion of asynchronous DMA IO. */
+        TickType_t started = xTaskGetTickCount();
+        while (__atomic_load_n(&s_pending_color_transfers, __ATOMIC_ACQUIRE) != 0U)
+        {
+            if ((xTaskGetTickCount() - started) >= pdMS_TO_TICKS(2000U))
+            {
+                ESP_LOGE(TAG, "Timed out waiting for display SPI transfers");
+                break;
+            }
+            (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50U));
+        }
 
-        _lock_release(
-            &s_lvgl_api_lock
-        );
 
         /*
          * A pause request can arrive while lv_timer_handler() is active.
@@ -1245,6 +1267,7 @@ static void tft_dashboard_position_astro_locked(lv_obj_t *image, int64_t current
     lv_obj_set_pos(image, center_x - TFT_ASTRO_BODY_WIDTH / 2, center_y - TFT_ASTRO_BODY_HEIGHT / 2);
 
     lv_obj_clear_flag(image, LV_OBJ_FLAG_HIDDEN);
+
     lv_obj_invalidate(image);
 }
 
@@ -2161,6 +2184,46 @@ void tft_dashboard_set_weather(float temperature_c, const char *condition, const
     {
         free(new_icon_pixels);
     }
+}
+
+void tft_dashboard_release_forecast_icons(void)
+{
+    if (!s_dashboard_created || g_tft_display_paused)
+    {
+        return;
+    }
+
+    size_t bytes_released = 0U;
+    _lock_acquire(&s_lvgl_api_lock);
+
+    /* Disconnect every LVGL image before freeing its backing allocation. */
+    for (size_t i = 0U; i < TFT_FORECAST_COUNT; i++)
+    {
+        if (s_forecast_icon[i] != NULL)
+        {
+            lv_obj_add_flag(s_forecast_icon[i], LV_OBJ_FLAG_HIDDEN);
+            lv_image_set_src(s_forecast_icon[i], NULL);
+        }
+    }
+
+    /* Cached draws must not continue pointing at a released descriptor. */
+    lv_image_cache_drop(NULL);
+
+    for (size_t i = 0U; i < TFT_FORECAST_COUNT; i++)
+    {
+        if (s_forecast_icon_buffers[i] != NULL)
+        {
+            bytes_released += s_forecast_icon_descriptors[i].data_size;
+            free(s_forecast_icon_buffers[i]);
+            s_forecast_icon_buffers[i] = NULL;
+        }
+        memset(&s_forecast_icon_descriptors[i], 0, sizeof(s_forecast_icon_descriptors[i]));
+        s_forecast_active_icon_paths[i][0] = '\0';
+    }
+
+    _lock_release(&s_lvgl_api_lock);
+
+    ESP_LOGI(TAG, "Forecast icons released: %u pixel bytes", (unsigned int)bytes_released);
 }
 
 void tft_dashboard_set_forecast(const weatherstation_forecast_t *forecast, size_t count)

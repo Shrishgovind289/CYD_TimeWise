@@ -87,6 +87,9 @@ void tft_dashboard_set_weather(
 /* Update five weather-forecast cards, from the server's hourly data. */
 void tft_dashboard_set_forecast(const weatherstation_forecast_t *forecast, size_t count);
 
+/* Release only forecast icon pixels; preserve forecast labels and all primary UI. */
+void tft_dashboard_release_forecast_icons(void);
+
 /* -------------------------------------------------------------------------- */
 /*                         Sun / Moon                                         */
 /* -------------------------------------------------------------------------- */
