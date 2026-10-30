@@ -1631,6 +1631,84 @@ Speaker
 ```
 
 ---
+# V3.3 — Forecast Scheduling and Memory Management
+
+V3.3 focuses on improving the reliability of the weather dashboard while working within the ESP32's limited internal RAM. The server/client architecture introduced in V3 remains unchanged: the Linux gateway continues to provide the `/weather` and `/forecast` endpoints, while the ESP32 handles scheduling, data selection, and rendering.
+
+---
+## Problem — Weather Tasks Could Not Always Start
+
+During extended operation, the ESP32 sometimes had enough total free heap but not a large enough contiguous allocation to create a new weather request task with an 8 KB stack. When task creation failed, subsequent weather and forecast requests could not proceed.
+
+### Solution — Persistent Weather Worker
+
+V3.3 creates a dedicated weather worker task at startup and signals it when an HTTP request is due, rather than creating and deleting the task for each request. This reserves the worker stack while memory is less fragmented and avoids repeated large task-stack allocations.
+
+The worker handles **one request at a time**: either current weather or forecast data. This addresses task creation failures, but does not eliminate other potential memory or display problems.
+
+---
+## Problem — Five-Hour Forecast Icon Allocation
+
+Each forecast weather icon is loaded from an RGB565 file on the SD card and converted to ARGB8888 for LVGL. For example, `NIGHT.BIN` has a 49 × 50 source image, using approximately 4,900 bytes of temporary RGB565 pixel data. Its rendered 29 × 30 ARGB8888 version occupies 3,480 bytes of retained pixel memory.
+
+Both buffers are briefly needed during conversion. Additionally, each forecast card retains its own converted icon buffer, even when several cards display the same image.
+
+With five forecast cards, logs showed the first three icons loading successfully, followed by 3,480-byte allocation failures for the fourth and fifth. The forecast API had already returned five entries successfully: **the failure occurred during icon conversion and allocation, not during data retrieval**.
+
+### Solution — Four-Hour Forecast
+
+V3.3 displays **the next four valid future hourly forecasts**. The ESP32 skips past and current hours and stores only four future entries. One fewer forecast card reduces the number of LVGL objects, time and temperature labels, icon buffers, and associated rendering work.
+
+**No server-side change is required.** The gateway may continue to return its existing hourly data; the ESP32 selects the first four valid future entries. The number of forecast HTTP requests remains unchanged.
+
+---
+## Forecast Icon Buffer Release
+
+V3.3 releases retained forecast icon buffers before scheduled current-weather requests, allowing the main weather update to run with more free memory. After a later forecast request, the icons are reloaded from the SD card.
+
+The half-hour schedule uses local NTP time:
+
+| Time | Action |
+|---|---|
+| `HH:59:55` | Release forecast icons; request current weather |
+| `HH:01:30` | Request forecast data |
+| `HH:01:55` | Permit forecast icon reload |
+| `HH:29:55` | Release forecast icons; request current weather |
+| `HH:31:30` | Request forecast data |
+| `HH:31:55` | Permit forecast icon reload |
+
+This makes current weather a priority over forecast graphics. The clock, date, main weather icon, background, and Sun/Moon indicator are intended to remain operational during forecast-buffer release and reload.
+
+---
+## Memory Diagnostics
+
+V3.3 adds heap diagnostics that report:
+
+- **Free heap:** total currently available memory.
+- **Largest free block:** largest allocation that can be satisfied from a contiguous block.
+- **Minimum free heap:** lowest free-heap value observed since boot.
+
+Example observations from testing:
+
+| Measurement | Five-hour test | Four-hour test |
+|---|---:|---:|
+| Free heap before icon reload | 21,344 bytes | 30,836 bytes |
+| Largest block before reload | 10,240 bytes | 22,528 bytes |
+| Forecast icons loaded | 3 of 5 | 4 of 4 |
+| Free heap after reload | 10,580 bytes | 16,420 bytes |
+
+The tests began with different available heap values, so the entire difference cannot be attributed solely to removing one forecast card. With four `NIGHT.BIN` icons, 13,920 bytes of converted icon pixels were retained; the total observed heap reduction was approximately 14,416 bytes, including other allocations and overhead.
+
+---
+## Overnight Test and Known Limitation
+
+An overnight test showed that the clock and other TimeWise functions continued running, but forecast icon visibility failed by around 9 AM. Because there were no serial logs captured at the moment of failure, the cause has not yet been confirmed. Possibilities include a later allocation failure or a state-management problem during icon release and reload.
+
+**V3.3 is a more consistent experimental configuration, not a complete fix for long-term forecast icon reliability.**
+
+Possible future improvements include streaming RGB565 conversion one row at a time, reusing converted icon buffers for identical forecast conditions, and recording more detailed diagnostics for each forecast icon allocation and visibility transition.
+
+---
 # Version Summary
 | Version | Major Features |
 |---|---|
@@ -1643,6 +1721,7 @@ Speaker
 | **V3** | Linux server/client architecture and HTTP gateway |
 | **V3.1** | Server-side weather API and five-hour forecast |
 | **V3.2** | Server-side Navidrome API, MP3 decoding and PCM audio streaming |
+| **V3.3** | Four-hour forecast, persistent weather worker, half-hour scheduling, icon buffer release/reload and heap diagnostics |
 
 The development progression can be summarized as:
 ```text
@@ -1681,6 +1760,10 @@ Server Weather + Five-Hour Forecast
 ▼
 V3.2
 Server Navidrome + FFmpeg + PCM Streaming
+│
+▼
+V3.3
+Four-Hour Forecast + RAM Management
 ```
 
 ## License
